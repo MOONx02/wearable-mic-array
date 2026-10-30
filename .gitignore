@@ -7,6 +7,7 @@ esp32s3/mic_takes/
 esp32s3/takes/
 *.wav
 !hud/sim/tts_*.wav
+!docs/app/demo/tts_*.wav
 hud/sim/recording.wav
 hud/sim/premix.npz
 hud/out/*
