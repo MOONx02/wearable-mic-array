@@ -10,15 +10,6 @@ Options:
                         x = toward the wearer's left, y = toward the front, from the array centre.
                         Default: the 6-mic breadboard (mic-array-6-wiring.png with the outer front
                         pair on D1 and the inner pair on D3).
-    --compact / --no-compact
-                        full-screen touch layout for small screens such as the Raspberry Pi 7"
-                        display (default: on when the screen is under 1100 px wide; Esc or ✕ quits)
-    --model NAME        Whisper model for the live subtitles (default base.en)
-    --no-captions       no subtitles (they need faster-whisper; see mic_caption_view.py)
-
-Subtitles reuse mic_caption_view.py: the four front mics are aimed at the talker (voice focus),
-Whisper turns the speech into text on this computer, and each line is placed in the picture by
-the 360° direction of the talker, with ◀ / ▶ when they're out of frame.
 
 Same picture as mic_camera_view.py, but every working mic pair is used at once (SRP-PHAT), and
 the back mics tell front from behind. A sound inside the picture glows where it is; outside the
@@ -33,7 +24,6 @@ left/right"; if sounds in front show behind, tick "Swap front/back".
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sys
@@ -51,14 +41,12 @@ import wave  # noqa: E402
 import numpy as np  # noqa: E402
 import serial  # noqa: E402
 from PySide6.QtCore import QPointF, QRectF, QSettings, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QKeySequence, QLinearGradient, QPainter, QPen, QPolygonF, QShortcut  # noqa: E402
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen, QPolygonF  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout,  # noqa: E402
-                               QLabel, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget)
+                               QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from mic_camera_view import (BG, DIM, EDGE, FS, GLOW, HISTORY_S, HOLD_S, INK, LOUD, C, ALERT,  # noqa: E402
                              font, label_box, panel, with_alpha)
-
-mcv = None  # mic_caption_view, imported only when captions are on
 
 CH = 8
 SEG = 1024                 # samples per direction estimate (64 ms)
@@ -401,54 +389,9 @@ class Model360(cv.Model):
 # ------------------------------------------------------------------ drawing
 
 class View360(cv.View):
-    def __init__(self, model: Model360, reader, compact: bool = False, captioner=None):
+    def __init__(self, model: Model360, reader):
         super().__init__(model, reader)
         self.swap_fb = False
-        self.compact = compact
-        self.cap = captioner
-        self.show_captions = captioner is not None
-        if compact:
-            self.setMinimumSize(0, 0)
-
-    def paintEvent(self, ev):
-        if not self.compact and self.cap is None:
-            return super().paintEvent(ev)
-        if not self.compact:
-            p = QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing)
-            p.fillRect(self.rect(), BG)
-            w, h = self.width(), self.height()
-            gap = 14
-            left_w = w * 0.68
-            cam_r = QRectF(gap, gap, left_w - 1.5 * gap, h - 2 * gap)
-            x1 = left_w + 0.5 * gap
-            cw = w - x1 - gap
-            gauge_r = QRectF(x1, gap, cw, h * 0.36)
-            tr_r = QRectF(x1, gauge_r.bottom() + gap, cw, h * 0.28)
-            lvl_r = QRectF(x1, tr_r.bottom() + gap, cw, h * 0.20)
-            info_r = QRectF(x1, lvl_r.bottom() + gap, cw, h - lvl_r.bottom() - 2 * gap)
-            self.draw_camera(p, cam_r)
-            self.draw_gauge(p, gauge_r)
-            mcv.CaptionView.draw_transcript(self, p, tr_r)
-            self.draw_levels(p, lvl_r)
-            self.draw_info(p, info_r)
-            p.end()
-            return
-        # small screens (Pi 7" touchscreen, 800x480): camera | radar over mic levels, no board panel
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), BG)
-        w, h = self.width(), self.height()
-        gap = 6
-        left_w = w * 0.56
-        cam_r = QRectF(gap, gap, left_w - 1.5 * gap, h - 2 * gap)
-        x1 = left_w + 0.5 * gap
-        gauge_r = QRectF(x1, gap, w - x1 - gap, h * 0.66)
-        lvl_r = QRectF(x1, gauge_r.bottom() + gap, w - x1 - gap, h - gauge_r.bottom() - 2 * gap)
-        self.draw_camera(p, cam_r)
-        self.draw_gauge(p, gauge_r)
-        self.draw_levels(p, lvl_r)
-        p.end()
 
     def oriented(self, ang):
         """Array angle -> + = wearer's left, 0 = front, ±180 = behind."""
@@ -532,43 +475,11 @@ class View360(cv.View):
                 else:
                     self.draw_side_arrow(p, pic, rel, sigma, strength, now - t, fade, color, det)
         p.restore()
-        self.draw_captions(p, pic, f)
         p.setFont(font(12))
         p.setPen(DIM)
         p.drawText(QRectF(r.x() + 14, r.bottom() - 28, r.width() - 28, 20), Qt.AlignLeft | Qt.AlignVCenter,
                    "In view: glow at its spot (a column, no height). Out of view: arrow on that edge; "
                    "behind you: arrow at the bottom.")
-
-    def where(self, angle):
-        """Array angle -> (angle from the picture centre, 'in' | 'left' | 'right'), for the captions."""
-        if angle is None:
-            return None, "in"
-        rel = wrap(self.oriented(angle) - self.offset)
-        if abs(rel) <= self.hfov / 2:
-            return rel, "in"
-        return rel, "left" if rel > 0 else "right"
-
-    def draw_captions(self, p, pic, f):
-        if self.cap is None or not self.show_captions:
-            return
-        with self.cap.lock:
-            lines = [ln for ln in self.cap.lines if time.time() - ln["wall"] < mcv.CAPTION_HOLD_S][-2:]
-            partial = self.cap.partial
-            speaking = self.cap.speaking_angle
-        p.save()
-        p.setClipRect(pic)
-        if speaking is not None:
-            rel, side = self.where(speaking)
-            if side == "in":
-                mcv.CaptionView.draw_speaking_tag(self, p, pic.center().x() - f * math.tan(math.radians(rel)),
-                                                  pic.top() + 12)
-        rows = [(ln["text"], ln["angle"], ln["kind"], False) for ln in lines]
-        if partial:
-            rows.append((partial[0], partial[1], "speech", True))
-        rows = rows[-2:] if self.compact else rows[-3:]
-        if rows:
-            mcv.CaptionView.draw_subtitles(self, p, pic, rows)
-        p.restore()
 
     def draw_side_arrow(self, p, pic, rel, sigma, strength, age, fade, color, det):
         left = rel > 0
@@ -616,8 +527,7 @@ class View360(cv.View):
 
     def draw_gauge(self, p, r):
         panel(p, r, "Direction (top view, full circle)")
-        big, small, line1, line2 = (15, 10, 26, 46) if self.compact else (20, 12, 30, 58)
-        top = r.y() + (62 if self.compact else 80)
+        top = r.y() + 80
         cx, cy = r.center().x(), top + (r.bottom() - top) / 2
         R = min(r.width() * 0.36, (r.bottom() - top) / 2 - 22)
         box = QRectF(cx - R, cy - R, 2 * R, 2 * R)
@@ -679,14 +589,14 @@ class View360(cv.View):
             p.setPen(QPen(with_alpha(QColor("#ff7b72"), fade), 5, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(QPointF(cx, cy), self._xy(cx, cy, R - 8, a))
             rel = wrap(a - self.offset)
-            p.setFont(font(big, True))
+            p.setFont(font(20, True))
             p.setPen(INK)
             where = "in view" if abs(rel) <= self.hfov / 2 else ("behind" if abs(a) > 90 else "off screen")
-            p.drawText(QRectF(r.x(), r.y() + line1, r.width(), line2 - line1), Qt.AlignHCenter,
+            p.drawText(QRectF(r.x(), r.y() + 30, r.width(), 28), Qt.AlignHCenter,
                        f"{self.side_text(a)} · {where}")
-            p.setFont(font(small, mono=True))
+            p.setFont(font(12, mono=True))
             p.setPen(DIM)
-            p.drawText(QRectF(r.x(), r.y() + line2, r.width(), 18), Qt.AlignHCenter,
+            p.drawText(QRectF(r.x(), r.y() + 58, r.width(), 18), Qt.AlignHCenter,
                        f"{self.fb_text(det)} · {len(self.m.active())} mics")
         else:
             p.setFont(font(15))
@@ -699,7 +609,7 @@ class View360(cv.View):
     def draw_levels(self, p, r):
         panel(p, r, "Mic levels (dBFS)")
         geom = sorted(self.m.geom.items())
-        inner = r.adjusted(52, 30, -48, -6) if self.compact else r.adjusted(150, 34, -64, -8)
+        inner = r.adjusted(150, 34, -64, -8)
         row_h = inner.height() / max(1, len(geom))
 
         def xf(db):
@@ -708,9 +618,9 @@ class View360(cv.View):
         for k, (ch, (name, _, _)) in enumerate(geom):
             y = inner.top() + k * row_h + row_h / 2
             color = GEOM_COLORS[k % len(GEOM_COLORS)]
-            p.setFont(font(11 if self.compact else 12, True))
+            p.setFont(font(12, True))
             p.setPen(color)
-            p.drawText(QPointF(r.x() + 14, y + 5), f"ch{ch}" if self.compact else f"ch{ch} {name}")
+            p.drawText(QPointF(r.x() + 14, y + 5), f"ch{ch} {name}")
             bh = min(14.0, row_h - 5)
             bar = QRectF(inner.left(), y - bh / 2, inner.width(), bh)
             p.setPen(Qt.NoPen)
@@ -720,8 +630,7 @@ class View360(cv.View):
             p.setFont(font(11, mono=True))
             if src is None:
                 p.setPen(ALERT)
-                p.drawText(QPointF(bar.left() + 8, y + 4),
-                           "no signal" if self.compact else "no signal: check 3V, GND, CLK, DAT")
+                p.drawText(QPointF(bar.left() + 8, y + 4), "no signal: check 3V, GND, CLK, DAT")
                 continue
             p.setBrush(color)
             p.drawRoundedRect(QRectF(bar.left(), bar.top(), xf(self.m.level[src]) - bar.left(), bh), 4, 4)
@@ -733,24 +642,6 @@ class View360(cv.View):
             p.drawText(QPointF(inner.right() + 8, y + 4), note)
 
 
-def load_captioner(model: Model360, geometry: dict, model_name: str):
-    """-> (Captioner, the 4 channels it listens to), or (None, why captions are off)."""
-    global mcv
-    if importlib.util.find_spec("faster_whisper") is None:
-        return None, "captions off: faster-whisper isn't installed"
-    import mic_caption_view
-    mcv = mic_caption_view
-
-    def speech_angle(_raw):
-        det = model.last_det
-        return det[1] if det and model.now - det[0] < 3.0 else None
-
-    mcv.angle_of = speech_angle  # Captioner.run looks angle_of up in its own module
-    chans = [ch for ch, _ in sorted(geometry.items(), key=lambda kv: -kv[1][2])][:mcv.CH]
-    chans += chans[:1] * (mcv.CH - len(chans))
-    return mcv.Captioner(model_name), chans
-
-
 # ------------------------------------------------------------------ window
 
 def main():
@@ -758,17 +649,10 @@ def main():
     ap.add_argument("--port", help="serial port (default: find the board automatically)")
     ap.add_argument("--geometry", help="mic positions JSON (see the top of this file)")
     ap.add_argument("--demo", nargs="?", const="", metavar="JPEG", help="run without a board")
-    ap.add_argument("--compact", action=argparse.BooleanOptionalAction, default=None,
-                    help="small-screen full-screen layout (default: on for screens under 1100 px wide)")
-    ap.add_argument("--model", default="base.en", help="Whisper model for the subtitles (base.en or small.en)")
-    ap.add_argument("--captions", action=argparse.BooleanOptionalAction, default=True,
-                    help="live subtitles (default on)")
     ap.add_argument("--screenshot", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     app = QApplication(sys.argv[:1])
-    screen = app.primaryScreen().availableGeometry() if app.primaryScreen() else None
-    compact = args.compact if args.compact is not None else bool(screen and screen.width() < 1100)
     geometry = load_geometry(args.geometry)
     model = Model360(geometry)
     if args.demo is not None:
@@ -776,17 +660,9 @@ def main():
     else:
         reader = Reader8(args.port)
     reader.start()
-    captioner, cap_chans, cap_note = None, [], ""
-    if args.captions:
-        captioner, cap_chans = load_captioner(model, geometry, args.model)
-        if captioner is None:
-            cap_note, cap_chans = cap_chans, []
-            print(cap_note, file=sys.stderr)
-        else:
-            captioner.start()
 
     settings = QSettings("CapstoneMicArray", "mic_camera_view360")
-    view = View360(model, reader, compact, captioner)
+    view = View360(model, reader)
     view.hfov = float(settings.value("hfov", 60.0))
     view.offset = float(settings.value("offset", 0.0))
     view.swap = settings.value("swap", "false") in (True, "true")
@@ -796,9 +672,9 @@ def main():
 
     win = QWidget()
     win.setWindowTitle("Camera + sound direction · 360°")
-    win.setStyleSheet(f"QWidget {{ background: #0d1117; color: #e6edf3; font-size: {13 if compact else 14}px; }}"
+    win.setStyleSheet("QWidget { background: #0d1117; color: #e6edf3; font-size: 14px; }"
                       "QPushButton, QComboBox { background: #21262d; border: 1px solid #30363d;"
-                      f" border-radius: 6px; padding: {'6px 8px' if compact else '5px 12px'}; }}"
+                      " border-radius: 6px; padding: 5px 12px; }"
                       "QPushButton:checked { background: #da3633; border-color: #ff7b72; }"
                       "QDoubleSpinBox { background: #21262d; border: 1px solid #30363d; padding: 3px; }")
     status = QLabel()
@@ -831,76 +707,24 @@ def main():
     thresh.setValue(int(model.threshold_db))
     thresh.setFixedWidth(120)
     thresh_lbl = QLabel()
-    captions = QPushButton("CC") if compact else QCheckBox("Captions")
-    captions.setCheckable(True)
-    if compact:
-        captions.setStyleSheet("QPushButton:checked { background: #1f6feb; border-color: #58a6ff; }")
-    captions.setChecked(captioner is not None)
-    captions.setEnabled(captioner is not None)
-    captions.setToolTip(cap_note or f"Live subtitles from ch{', ch'.join(map(str, cap_chans))} (Whisper {args.model})")
-    focus = QCheckBox("Voice focus")
-    focus.setChecked(True)
-    focus.setEnabled(captioner is not None)
-    focus.setToolTip("Clean the audio before captioning (four mics aimed at the talker, background removed)")
 
+    row1 = QHBoxLayout()
+    for wdg in (rec, snap, QLabel("Camera"), res, rotate, mirror, QLabel("Trigger"), thresh, thresh_lbl):
+        row1.addWidget(wdg)
+    row1.addStretch(1)
+    row1.addWidget(status)
+    row2 = QHBoxLayout()
+    for wdg in (QLabel("Calibrate:"), fov, set_centre, set_edge, swap, swap_fb):
+        row2.addWidget(wdg)
     hint = QLabel("Clap straight ahead → Set centre. Clap at the right edge of the picture → Set right edge.")
     hint.setStyleSheet("color: #8b949e; font-size: 12px;")
+    row2.addWidget(hint)
+    row2.addStretch(1)
     lay = QVBoxLayout(win)
-    if compact:
-        rec.setText("● Rec")
-        snap.setText("Snap")
-        set_centre.setText("Set centre")
-        set_edge.setText("Right edge")
-        swap.setText("Swap L/R")
-        swap_fb.setText("Swap F/B")
-        more = QPushButton("More")
-        more.setCheckable(True)
-        quit_btn = QPushButton("✕")
-        quit_btn.clicked.connect(win.close)
-        row1 = QHBoxLayout()
-        for wdg in (rec, snap, captions, set_centre, set_edge, swap, swap_fb):
-            row1.addWidget(wdg)
-        row1.addStretch(1)
-        row1.addWidget(more)
-        row1.addWidget(quit_btn)
-        extra = QWidget()
-        row2 = QHBoxLayout(extra)
-        row2.setContentsMargins(0, 0, 0, 0)
-        for wdg in (res, rotate, mirror, fov, focus, QLabel("Trigger"), thresh, thresh_lbl):
-            row2.addWidget(wdg)
-        row2.addStretch(1)
-        extra.setVisible(False)
-        more.toggled.connect(extra.setVisible)
-        hint.setText("Clap ahead → Set centre · clap at right edge → Right edge")
-        row3 = QHBoxLayout()
-        for lbl in (hint, status):
-            lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
-            lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        row3.addWidget(hint, 1)
-        row3.addWidget(status, 1)
-        lay.setContentsMargins(4, 4, 4, 2)
-        lay.setSpacing(3)
-        lay.addLayout(row1)
-        lay.addWidget(extra)
-        lay.addLayout(row3)
-    else:
-        row1 = QHBoxLayout()
-        for wdg in (rec, snap, captions, focus, QLabel("Camera"), res, rotate, mirror,
-                    QLabel("Trigger"), thresh, thresh_lbl):
-            row1.addWidget(wdg)
-        row1.addStretch(1)
-        row1.addWidget(status)
-        row2 = QHBoxLayout()
-        for wdg in (QLabel("Calibrate:"), fov, set_centre, set_edge, swap, swap_fb):
-            row2.addWidget(wdg)
-        row2.addWidget(hint)
-        row2.addStretch(1)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.addLayout(row1)
-        lay.addLayout(row2)
+    lay.setContentsMargins(8, 8, 8, 8)
+    lay.addLayout(row1)
+    lay.addLayout(row2)
     lay.addWidget(view, 1)
-    QShortcut(QKeySequence(Qt.Key_Escape), win, win.close)
 
     def save():
         for k in ("hfov", "offset", "swap", "swap_fb", "rotate", "mirror"):
@@ -962,18 +786,7 @@ def main():
     def on_rec(checked):
         if checked != bool(model.recorder):
             model.toggle_record()
-        if captioner is not None:
-            with captioner.lock:
-                if model.recorder:
-                    path = model.record_path.with_name(model.record_path.stem + "_transcript.txt")
-                    captioner.transcript_file = open(path, "w")
-                elif captioner.transcript_file:
-                    captioner.transcript_file.close()
-                    captioner.transcript_file = None
-        if compact:
-            rec.setText("■ Stop" if model.recorder else "● Rec")
-        else:
-            rec.setText("■ Stop recording" if model.recorder else "● Record audio")
+        rec.setText("■ Stop recording" if model.recorder else "● Record audio")
 
     def on_snap():
         cv.TAKES.mkdir(parents=True, exist_ok=True)
@@ -994,43 +807,23 @@ def main():
     rec.toggled.connect(on_rec)
     snap.clicked.connect(on_snap)
 
-    def on_captions(v):
-        view.show_captions = v
-
-    def on_focus(v):
-        captioner.focus.enabled = v
-
-    captions.toggled.connect(on_captions)
-    focus.toggled.connect(on_focus)
-
     def tick():
-        chunks = reader.take()
-        model.push(chunks)
-        if captioner is not None:
-            captioner.feed([c[:, cap_chans] for c in chunks])
+        model.push(reader.take())
         view.update_frame()
         recs = f"  ● REC {model.record_path.name}" if model.recorder else ""
-        caps = f" · {captioner.status}" if compact and captioner is not None else ""
-        status.setText(f"{reader.port or '-'} · {reader.status}{caps}{recs}")
+        status.setText(f"{reader.port or '-'} · {reader.status}{recs}")
         view.update()
 
     timer = QTimer()
     timer.timeout.connect(tick)
     timer.start(33)
-    if compact and not args.screenshot:
-        win.showFullScreen()
-    else:
-        win.resize(*((800, 480) if compact else (1500, 900)))
-        win.show()
+    win.resize(1500, 900)
+    win.show()
     if args.screenshot:
         QTimer.singleShot(int(os.environ.get("SHOT_MS", "6000")),
                           lambda: (win.grab().save(args.screenshot), app.quit()))
     app.exec()
     reader.stop = True
-    if captioner is not None:
-        captioner.stop = True
-        if captioner.transcript_file:
-            captioner.transcript_file.close()
     if model.recorder:
         model.recorder.close()
 

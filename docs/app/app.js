@@ -589,7 +589,37 @@ const fbText = (d) => d.fb === null ? "front/back unknown (no back mic)" : d.fb 
 // ------------------------------------------------------------------ captions (browser speech recognition)
 
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-const cap = { on: S.cc, lines: [], interim: null, rec: null, failed: "", lastFinal: "" };
+const cap = { on: S.cc, lines: [], interim: null, rec: null, failed: "", lastFinal: "", local: false, note: "" };
+const capLang = () => navigator.language || "en-US";
+
+// Chrome's on-device recognizer skips the round trip to Google's servers: quicker words, and no internet
+// needed. Older Chrome versions name the API differently, and many devices don't have it at all.
+async function prepareLocal() {
+  if (!Recognition || cap.localTried) return;
+  cap.localTried = true;
+  const lang = capLang();
+  try {
+    let state = "unavailable";
+    if (typeof Recognition.available === "function") {
+      state = await Recognition.available({ langs: [lang], processLocally: true });
+      if (state === "downloadable" && typeof Recognition.install === "function") {
+        cap.note = "downloading the on-device speech model…";
+        if (await Recognition.install({ langs: [lang], processLocally: true })) state = "available";
+      }
+    } else if (typeof Recognition.availableOnDevice === "function") {
+      state = await Recognition.availableOnDevice(lang);
+      if (state === "downloadable" && typeof Recognition.installOnDevice === "function") {
+        cap.note = "downloading the on-device speech model…";
+        if (await Recognition.installOnDevice(lang)) state = "available";
+      }
+    }
+    cap.local = state === "available";
+  } catch (e) { cap.local = false; }
+  cap.note = cap.local ? "on-device" : "online";
+  if (cap.local && cap.rec) {
+    try { cap.rec.abort(); } catch (e) { /* restarts on-device from onend */ }
+  }
+}
 
 function speechAngle() {
   const d = model.last;
@@ -617,7 +647,14 @@ function capStart() {
   const r = new Recognition();
   r.continuous = true;
   r.interimResults = true;
-  r.lang = navigator.language || "en-US";
+  r.maxAlternatives = 1;
+  r.lang = capLang();
+  if (cap.local) {
+    try {
+      if ("processLocally" in r) r.processLocally = true;
+      else if ("mode" in r) r.mode = "ondevice-preferred";
+    } catch (e) { /* stays online */ }
+  }
   r.onresult = (e) => {
     let fin = "", intr = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -633,7 +670,10 @@ function capStart() {
     cap.interim = intr ? { text: intr, angle: a } : null;
   };
   r.onerror = (e) => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+    if (cap.local && (e.error === "language-not-supported" || e.error === "service-not-allowed")) {
+      cap.local = false;
+      cap.note = "online";
+    } else if (e.error === "not-allowed" || e.error === "service-not-allowed") {
       cap.failed = "microphone blocked for this page: allow it in Chrome's site settings, or use Live Caption";
       cap.on = false;
       uiSync();
@@ -642,6 +682,8 @@ function capStart() {
   const started = performance.now();
   r.onend = () => {
     cap.rec = null;
+    // a session cut off mid-phrase never sends the final result; keep the words already shown
+    if (cap.interim && cap.on) addLine(cap.interim.text, cap.interim.angle);
     cap.interim = null;
     cap.lastFinal = "";
     cap.quickEnds = performance.now() - started < 1500 ? (cap.quickEnds || 0) + 1 : 0;
@@ -650,7 +692,7 @@ function capStart() {
       cap.quickEnds = 0;
       return;
     }
-    if (cap.on && !cap.failed) setTimeout(capStart, 250);
+    if (cap.on && !cap.failed) capStart();  // Android stops after every pause; words in a restart gap are lost
   };
   try {
     r.start();
@@ -1067,7 +1109,8 @@ function drawLevels(r) {
 
 function drawTranscript(r) {
   panel(r, "Transcript");
-  const state = cap.failed ? cap.failed : !Recognition ? "no speech recognition" : cap.on ? (cap.rec ? "listening" : "starting…") : "captions off";
+  const state = cap.failed ? cap.failed : !Recognition ? "no speech recognition"
+    : cap.on ? `${cap.rec ? "listening" : "starting…"}${cap.note ? " · " + cap.note : ""}` : "captions off";
   ctx.font = font(11);
   let st = state;
   while (st.length > 4 && ctx.measureText(st).width > r.w - 120) st = st.slice(0, -2);
@@ -1079,6 +1122,19 @@ function drawTranscript(r) {
   ctx.rect(inner.x, inner.y, inner.w, inner.h);
   ctx.clip();
   let y = inner.b;
+  if (cap.interim) {
+    ctx.font = `italic ${font(14)}`;
+    const lines = wrapLines(cap.interim.text, inner.w);
+    y -= lines.length * 18;
+    lines.forEach((l, j) => {
+      ctx.font = `italic ${font(14)}`;
+      ctx.fillStyle = "#c9d1d9";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(l, inner.x, y + j * 18 + 9);
+    });
+    y -= 8;
+  }
   for (let i = cap.lines.length - 1; i >= 0 && y > inner.y; i--) {
     const ln = cap.lines[i];
     ctx.font = font(14);
@@ -1094,7 +1150,7 @@ function drawTranscript(r) {
   if (!cap.lines.length && cap.failed) {
     ctx.font = font(13);
     wrapLines(cap.failed, inner.w - 20).forEach((l, j) => text(l, inner.cx, inner.cy + j * 18, 13, LOUD, "center"));
-  } else if (!cap.lines.length) {
+  } else if (!cap.lines.length && !cap.interim) {
     text(cap.on ? "say something" : "tap CC for subtitles", inner.cx, inner.cy, 14, DIM, "center");
   }
   ctx.restore();
@@ -1217,7 +1273,7 @@ $("cc").onclick = () => {
   S.cc = cap.on;
   save();
   cap.failed = "";
-  if (cap.on) capStart(); else capStop();
+  if (cap.on) { capStart(); prepareLocal(); } else capStop();
   uiSync();
 };
 
@@ -1264,9 +1320,10 @@ $("go").onclick = () => {
       : "USB needs a secure page: open this from its https:// address (or localhost).";
     return;
   }
+  prepareLocal();
   connect(c);
 };
-$("demo").onclick = () => connect(new DemoConn());
+$("demo").onclick = () => { prepareLocal(); connect(new DemoConn()); };
 $("disconnect").onclick = async () => {
   const c = conn;
   conn = null;
