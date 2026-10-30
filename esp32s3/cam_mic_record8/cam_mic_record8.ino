@@ -15,6 +15,10 @@
 // Takes shorter than half a second are deleted when they stop.
 // USB commands (single bytes) in addition to cam_mic_stream's '1' '2' '3' frame sizes:
 //   'a' = record voice only, 'v' = record voice + video, 's' = stop.
+//   'k' + one mask byte = stream only those channels (bit n = ch n) as 'MK' packets:
+//       'M' 'K', uint32 seq, uint16 frames, uint8 mask, uint8 0, int16 samples of the masked channels
+//   For hosts whose USB link can't carry all eight plus the camera (Android tablets). The host repeats it;
+//   with no 'k' for 5 s the board goes back to all eight as 'M8'. The card always gets all eight.
 //
 // On the card, one folder per recording ("take"):
 //   /takes/T0001/info.txt      settings and final stats (key=value)
@@ -133,6 +137,9 @@ Ring audio_ring, video_ring;
 i2s_chan_handle_t rx = nullptr;
 volatile uint32_t audio_overruns = 0;
 volatile uint32_t audio_dropped = 0;
+std::atomic<uint8_t> stream_mask{0xFF};    // channels sent over USB ('k' command)
+std::atomic<uint32_t> stream_mask_ms{0};   // when the host last asked
+constexpr uint32_t MASK_HOLD_MS = 5000;
 
 std::atomic<bool> rec_on{false};      // producers push into the rings while this is set
 std::atomic<bool> rec_video{false};
@@ -219,11 +226,34 @@ static void audio_task(void *) {
     clock_us = now;
     portEXIT_CRITICAL(&clock_mux);
 
-    memcpy(pkt + 4, &seq, 4);
-    memcpy(pkt + 8, &frames, 2);
+    uint8_t mask = stream_mask.load();
+    if (mask != 0xFF && millis() - stream_mask_ms.load() > MASK_HOLD_MS) {
+      mask = 0xFF;
+      stream_mask.store(0xFF);
+    }
     // While recording, never wait for the laptop: with no USB host attached this would stall the mics.
-    if (!send_packet(pkt, 10 + frames * CHANNELS * sizeof(int16_t), recording ? 0 : pdMS_TO_TICKS(100)))
-      audio_dropped = audio_dropped + 1;
+    TickType_t wait = recording ? 0 : pdMS_TO_TICKS(100);
+    bool sent;
+    if (mask == 0xFF) {
+      memcpy(pkt + 4, &seq, 4);
+      memcpy(pkt + 8, &frames, 2);
+      sent = send_packet(pkt, 10 + frames * CHANNELS * sizeof(int16_t), wait);
+    } else {
+      static uint8_t kpkt[12 + FRAMES * CHANNELS * sizeof(int16_t)] = {0xA5, 0x5A, 'M', 'K'};
+      int chans[CHANNELS], n = 0;
+      for (int c = 0; c < CHANNELS; c++)
+        if (mask & (1 << c)) chans[n++] = c;
+      memcpy(kpkt + 4, &seq, 4);
+      memcpy(kpkt + 8, &frames, 2);
+      kpkt[10] = mask;
+      kpkt[11] = 0;
+      const int16_t *in = reinterpret_cast<const int16_t *>(pkt + 10);
+      int16_t *out = reinterpret_cast<int16_t *>(kpkt + 12);
+      for (int f = 0; f < frames; f++)
+        for (int i = 0; i < n; i++) *out++ = in[f * CHANNELS + chans[i]];
+      sent = send_packet(kpkt, 12 + frames * n * sizeof(int16_t), wait);
+    }
+    if (!sent) audio_dropped = audio_dropped + 1;
     seq++;
   }
 }
@@ -283,6 +313,14 @@ static void camera_task(void *) {
     while (usb_serial_jtag_read_bytes(&ch, 1, 0) == 1) {
       if (ch == 'a' || ch == 'v' || ch == 's') {
         rec_request.store(ch == 'a' ? 1 : ch == 'v' ? 2 : 3);
+        continue;
+      }
+      if (ch == 'k') {
+        uint8_t m;
+        if (usb_serial_jtag_read_bytes(&m, 1, pdMS_TO_TICKS(50)) == 1 && m) {
+          stream_mask_ms.store(millis());
+          stream_mask.store(m);
+        }
         continue;
       }
       framesize_t fs = ch == '1' ? FRAMESIZE_QVGA : ch == '2' ? FRAMESIZE_VGA : ch == '3' ? FRAMESIZE_SVGA : FRAMESIZE_INVALID;

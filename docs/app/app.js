@@ -306,7 +306,20 @@ class Parser {
         const end = p + 10 + frames * CH * 2;
         if (end > n) break;
         const s = new Int16Array(b.buffer.slice(b.byteOffset + p + 10, b.byteOffset + end));  // little-endian host
-        this.on.mic(seq, frames, s);
+        this.on.mic(seq, frames, s, 0xff);
+        p = end;
+      } else if (k0 === 77 && k1 === 75) {  // 'MK': only the channels in the mask (asked for with 'k')
+        if (p + 12 > n) break;
+        const seq = dv.getUint32(p + 4, true), frames = dv.getUint16(p + 8, true), mask = b[p + 10];
+        const chans = [];
+        for (let c = 0; c < CH; c++) if (mask & (1 << c)) chans.push(c);
+        if (frames === 0 || frames > 4096 || !chans.length) { p += 2; continue; }
+        const nc = chans.length, end = p + 12 + frames * nc * 2;
+        if (end > n) break;
+        const src = new Int16Array(b.buffer.slice(b.byteOffset + p + 12, b.byteOffset + end));
+        const s = new Int16Array(frames * CH);
+        for (let f = 0; f < frames; f++) for (let i = 0; i < nc; i++) s[f * CH + chans[i]] = src[f * nc + i];
+        this.on.mic(seq, frames, s, mask);
         p = end;
       } else if (k0 === 77 && k1 === 52) {  // 'M4': the 4-mic firmware
         this.on.wrong();
@@ -676,12 +689,13 @@ function wavToFloat(buf) {
 
 const model = new Model();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
-let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null;
+let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null, streamMask = 0xff;
 const pktTimes = [], frameTimes = [], rxTimes = [];
 const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
 
 const parser = new Parser({
-  mic(seq, frames, s) {
+  mic(seq, frames, s, mask) {
+    streamMask = mask;
     if (lastSeq !== null && seq !== ((lastSeq + 1) >>> 0)) gaps++;
     lastSeq = seq;
     model.push(s, frames);
@@ -1697,6 +1711,11 @@ setInterval(() => {
     s += ` (got ${rx.toFixed(0)}, board sent ${bs ? `${(+bs[1]).toFixed(0)}, skipped ${bs[2]}, mic drops ${bs[3]}` : "?"})`;
     if (decodeErrors || decodeFails) s += ` · bad JPEG ${decodeErrors}/${decodeFails}`;
     s += ` · USB ${kbs.toFixed(0)} kB/s${perRead ? ` (${(perRead / 1024).toFixed(0)}/${((conn.size || 0) / 1024).toFixed(0)} KB per read)` : ""} · load ${load.toFixed(0)}%`;
+    if (streamMask !== 0xff) {
+      let k = 0;
+      for (let c = 0; c < CH; c++) if (streamMask & (1 << c)) k++;
+      s += ` · ${k} of ${CH} mics over USB`;
+    }
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
   }
@@ -1705,6 +1724,17 @@ setInterval(() => {
   $("conn").textContent = s;
   $("conn").title = boardStats || boardMsg;
 }, 500);
+
+// The tablet's USB link can't carry all eight mics plus the camera, so ask the board for just the mics
+// the layout uses (and any data-line partner standing in for a dead one). Repeated, because the board
+// goes back to all eight when the requests stop.
+setInterval(() => {
+  if (!(conn instanceof UsbConn) || connState !== "streaming" || model.total < FS) return;
+  let mask = 0;
+  for (const ch of model.chans) mask |= 1 << ch;
+  for (const [, src] of model.active()) mask |= 1 << src;
+  conn.send(new Uint8Array([107, mask]));  // 'k'
+}, 2000);
 
 setInterval(() => {
   const t0 = performance.now();
