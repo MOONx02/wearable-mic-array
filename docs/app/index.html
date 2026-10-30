@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d1117">
+<title>Mic array 360</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3;
+    font: 14px -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; overflow: hidden;
+    -webkit-user-select: none; user-select: none; }
+  body { display: flex; flex-direction: column; }
+  #bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: calc(6px + env(safe-area-inset-top)) 8px 4px 8px; }
+  #bar .grow { flex: 1; }
+  button, select { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
+    padding: 8px 12px; font: inherit; }
+  button.on { background: #1f6feb; border-color: #58a6ff; }
+  button.rec.on { background: #da3633; border-color: #ff7b72; }
+  button:disabled { opacity: 0.45; }
+  #more { display: none; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 8px 4px; color: #8b949e; }
+  #more.open { display: flex; }
+  #more input[type=number] { width: 56px; background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px; font: inherit; }
+  #status { display: flex; gap: 12px; color: #8b949e; font-size: 12px; padding: 0 10px 4px; white-space: nowrap; }
+  #status span { overflow: hidden; text-overflow: ellipsis; }
+  #hint { flex: 1; }
+  #wrap { position: relative; flex: 1; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+  #connect { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 14px; background: rgba(13, 17, 23, 0.92); text-align: center; padding: 20px; }
+  #connect.hidden { display: none; }
+  #connect h1 { font-size: 22px; margin: 0; }
+  #connect p { color: #8b949e; max-width: 520px; margin: 0; line-height: 1.45; }
+  #connect .big { font-size: 18px; padding: 14px 28px; }
+  #connect .err { color: #ff7b72; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="cc" class="on" title="Live subtitles (Chrome speech recognition, phone/tablet mic)">CC</button>
+  <button id="centre" title="Clap straight in front of the camera, then press this">Set centre</button>
+  <button id="edge" title="Clap at the right edge of the picture, then press this">Right edge</button>
+  <button id="swaplr">Swap L/R</button>
+  <button id="swapfb">Swap F/B</button>
+  <span class="grow"></span>
+  <button id="morebtn">More</button>
+  <button id="disconnect" title="Disconnect">✕</button>
+</div>
+<div id="more">
+  <label>Layout <select id="layout"></select></label>
+  <label>Camera <select id="res"><option value="1">320×240</option><option value="2">640×480</option>
+    <option value="3">800×600</option></select></label>
+  <button id="rotate">Rotate 0°</button>
+  <button id="mirror">Mirror</button>
+  <label>View <input id="fov" type="number" min="20" max="140" step="1">°</label>
+  <label>Trigger <input id="thr" type="range" min="4" max="30" step="1"> <span id="thrv"></span></label>
+  <button id="rec" class="rec" title="Record to the board's microSD card">● Rec SD</button>
+</div>
+<div id="status"><span id="hint">Clap ahead → Set centre · clap at the right edge → Right edge</span><span id="conn">not connected</span></div>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div id="connect">
+    <h1>Mic array 360</h1>
+    <p>Plug the ESP32-S3 (cam_mic_record8 firmware) into this device's USB-C port, then tap Connect and pick the board.</p>
+    <button id="go" class="big on">Connect USB</button>
+    <button id="demo">Demo (no board)</button>
+    <p id="why"></p>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
