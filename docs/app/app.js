@@ -444,12 +444,15 @@ class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
       onState("streaming");
       const ep = this.data.inEp, q = [];
       try {
-        // several large reads queued, so the board's buffer keeps draining even when the page is busy
-        for (let i = 0; i < 12; i++) q.push(this.dev.transferIn(ep, 16384));
+        // Each read can come back with only a packet or two, and every read is a round trip through the
+        // browser, so keep many queued: the board is only polled while a read is waiting (the kernel serial
+        // driver on a Pi or laptop does this itself)
+        for (let i = 0; i < 64; i++) q.push(this.dev.transferIn(ep, 16384));
         for (;;) {
           const r = await q.shift();
           if (this.closed) return;
           q.push(this.dev.transferIn(ep, 16384));
+          usbReads++;
           if (r.status === "ok" && r.data && r.data.byteLength) {
             onData(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
           } else if (r.status === "stall") {
@@ -663,7 +666,7 @@ function wavToFloat(buf) {
 
 const model = new Model();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
-let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0;
+let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0;
 const pktTimes = [], frameTimes = [], rxTimes = [];
 const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
 
@@ -1665,8 +1668,10 @@ let busyAt = performance.now();
 setInterval(() => {
   const now = performance.now(), pk = rate(pktTimes, now), fps = rate(frameTimes, now), rx = rate(rxTimes, now);
   const load = (100 * busy.ms) / (now - busyAt), kbs = usbBytes / (now - busyAt);
+  const perRead = usbReads ? usbBytes / usbReads : 0;
   busy.ms = 0;
   usbBytes = 0;
+  usbReads = 0;
   busyAt = now;
   let s = conn ? `${conn.name} · ${connState}` : "not connected";
   if (conn && (connState === "streaming" || conn instanceof DemoConn)) {
@@ -1675,7 +1680,7 @@ setInterval(() => {
     const bs = /([\d.]+) camera fps, (\d+) frames skipped, (\d+) mic packets dropped/.exec(boardStats);
     s += ` (got ${rx.toFixed(0)}, board sent ${bs ? `${(+bs[1]).toFixed(0)}, skipped ${bs[2]}, mic drops ${bs[3]}` : "?"})`;
     if (decodeErrors || decodeFails) s += ` · bad JPEG ${decodeErrors}/${decodeFails}`;
-    s += ` · USB ${kbs.toFixed(0)} kB/s · load ${load.toFixed(0)}%`;
+    s += ` · USB ${kbs.toFixed(0)} kB/s${perRead ? ` (${perRead.toFixed(0)} B/read)` : ""} · load ${load.toFixed(0)}%`;
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
   }
