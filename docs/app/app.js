@@ -1,7 +1,7 @@
 // Mic array 360 in the browser: reads the ESP32-S3 (cam_mic_record8) USB stream, finds the direction of
 // sounds with SRP-PHAT over every mic pair (same maths as mic_camera_view360.py), draws the camera
-// picture with a glow / edge arrows, a 360° radar, mic levels, and live subtitles from the browser's
-// speech recognition placed by the direction of the talker.
+// picture with a glow / edge arrows, a 360° radar, mic levels, and live subtitles: the array's voice focus
+// (MVDR + Wiener, as in mic_caption_view.py) feeds an offline recognizer (Vosk), placed by the talker's direction.
 "use strict";
 
 const FS = 16000, CH = 8, C = 343, SEG = 1024, NFFT = 2048, INTERP = 8;
@@ -22,7 +22,7 @@ const PRESETS = {
 };
 
 const S = Object.assign({ layout: "rear5", hfov: 60, offset: 0, swap: false, swapfb: false, rotate: 0,
-                          mirror: false, thr: 12, cc: true }, JSON.parse(localStorage.getItem("mic360") || "{}"));
+                          mirror: false, thr: 12, cc: true, focus: true }, JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (!PRESETS[S.layout]) S.layout = "rear5";
 const save = () => localStorage.setItem("mic360", JSON.stringify(S));
 const wrap = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
@@ -77,6 +77,7 @@ class Model {
     this.dc = new Float64Array(CH);
     this.level = new Float64Array(CH).fill(-120);
     this.floor = new Float64Array(CH).fill(-70);
+    this.levHist = Array.from({ length: CH }, () => []);
     this.dead = new Array(CH).fill(true);
     this.dets = [];
     this.last = null;
@@ -119,7 +120,7 @@ class Model {
     return out;
   }
 
-  tick(thr) {
+  tick(thr, voice = false) {
     if (this.total < FS / 10) return;
     for (let c = 0; c < CH; c++) {
       const blk = this.tail(c, 800, this.blk);
@@ -130,11 +131,14 @@ class Model {
       for (let i = 0; i < 800; i++) v += (blk[i] - m) * (blk[i] - m);
       const lv = 10 * Math.log10(v / 800 / (32768 * 32768) + 1e-12);
       this.level[c] = lv;
-      if (this.total < FS / 2) {
-        this.floor[c] = this.total > FS / 10 ? Math.min(this.floor[c], lv) : lv;
-        continue;
-      }
-      this.floor[c] = lv < this.floor[c] ? 0.7 * this.floor[c] + 0.3 * lv : this.floor[c] + 0.02;
+      // floor = the quiet level of the last ~5 s (10th percentile): settles on a steady fan within a second,
+      // and pauses between words keep it at the real background while someone talks
+      const hist = this.levHist[c];
+      hist.push(lv);
+      if (hist.length > 150) hist.shift();
+      const sorted = hist.slice().sort((a, b) => a - b);
+      this.floor[c] = sorted[Math.floor(sorted.length * 0.1)];
+      if (this.total < FS / 2) continue;
       const h = this.tail(c, FS / 2, this.half);
       let lo = Infinity, hi = -Infinity, same = 0;
       for (let i = 0; i < h.length; i++) {
@@ -145,7 +149,7 @@ class Model {
       }
       this.dead[c] = hi - lo < DEAD_PTP || same > STUCK_FRACTION * h.length;
     }
-    this.direction(thr);
+    this.direction(thr, voice);
   }
 
   // Channel that carries the mic at geometry slot ch: itself, or its data-line partner when the mic is
@@ -165,8 +169,8 @@ class Model {
     return out;
   }
 
-  steering(chans) {
-    const key = chans.join(",");
+  steering(chans, top = BAND[1]) {
+    const key = chans.join(",") + "@" + top;
     let st = this.steer.get(key);
     if (st) return st;
     const pos = chans.map((c) => [this.geom[c][1] / 1000, this.geom[c][2] / 1000]);
@@ -193,7 +197,7 @@ class Model {
     }
     // GCC-PHAT is only needed at the lags the array can produce, so evaluate those directly instead of
     // an 8x zero-padded inverse FFT per pair.
-    const k0 = Math.ceil((BAND[0] * NFFT) / FS), k1 = Math.floor((BAND[1] * NFFT) / FS);
+    const k0 = Math.ceil((BAND[0] * NFFT) / FS), k1 = Math.floor((top * NFFT) / FS);
     const nb = k1 - k0 + 1, L = 2 * m + 1, N = NFFT * INTERP;
     const cosT = new Float32Array(L * nb), sinT = new Float32Array(L * nb);
     for (let l = 0; l < L; l++) {
@@ -239,7 +243,9 @@ class Model {
     return curve;
   }
 
-  direction(thr) {
+  // voice: someone is talking (voice focus says so), so search only the voice band, where the talker
+  // beats a fan; a clap keeps the full band
+  direction(thr, voice = false) {
     const act = this.active();
     if (this.total < FS / 2 || act.length < 2) return;
     const srcs = act.map((a) => a[1]);
@@ -247,8 +253,10 @@ class Model {
     for (const s of srcs) strength = Math.max(strength, this.level[s] - this.floor[s]);
     if (strength < thr) return;
     if (this.last && this.now - this.last.t < 0.08) return;
-    const st = this.steering(act.map((a) => a[0]));
-    const curve = this.srp(srcs, st);
+    const st = this.steering(act.map((a) => a[0]), voice ? 3400 : BAND[1]);
+    // while someone talks, show the whole phrase's direction (as the subtitles do), not one 64 ms snapshot
+    const phrase = voice ? speechCurve() : null;
+    const curve = phrase && phrase.n >= 5 ? phrase.sum : this.srp(srcs, st);
     let k = 0;
     for (let i = 1; i < 360; i++) if (curve[i] > curve[k]) k = i;
     let angle = k - 180;
@@ -485,59 +493,57 @@ class WsConn {  // tools/ws_bridge.py, or a Wi-Fi firmware later
   async close() { this.closed = true; this.ws?.close(); }
 }
 
-class DemoConn {  // no board: claps from all round the array, through the current layout
-  constructor() { this.name = "demo"; this.angles = [0, 40, -25, 120, -150, 180, 75, -100, 15, 160]; }
-  async open() {}
-  clap(ang) {
-    const n = NFFT, re = new Float64Array(n), im = new Float64Array(n);
-    for (let i = 200; i < n - 200; i++) re[i] = gauss() * Math.exp(-(i - 200) / 250) * Math.min(1, (i - 200) / 40);
-    fft(re, im);
-    const u = [Math.sin((ang * Math.PI) / 180), Math.cos((ang * Math.PI) / 180)];
-    const out = {};
-    let peak = 1e-9;
-    for (const [ch, [, x, y]] of Object.entries(model.geom)) {
-      const delay = -((x / 1000) * u[0] + (y / 1000) * u[1]) / C;
-      const r = new Float64Array(n), i = new Float64Array(n);
-      for (let k = 0; k < n; k++) {
-        const f = (k <= n / 2 ? k : k - n) * (FS / n), ph = -2 * Math.PI * f * delay;
-        const c = Math.cos(ph), s = Math.sin(ph);
-        r[k] = re[k] * c - im[k] * s;
-        i[k] = -(re[k] * s + im[k] * c);  // conjugate, so the forward FFT acts as an inverse
-      }
-      fft(r, i);
-      r.fill(0, 0, 190);  // fractional-delay ringing ahead of the onset; a real clap has none
-      for (let k = 0; k < n; k++) peak = Math.max(peak, Math.abs(r[k]));
-      out[ch] = r;
+class DemoConn {  // no board: recorded speech and claps from all round the array over a fan behind, through the current layout
+  constructor() { this.name = "demo"; }
+  async open() {
+    this.clips = {};
+    for (const k of ["a1", "b1", "a2"]) {
+      try { this.clips[k] = wavToFloat(await (await fetch(`demo/tts_${k}.wav`)).arrayBuffer()); } catch (e) { /* claps only */ }
     }
-    for (const ch in out) out[ch] = out[ch].map((v) => (v / peak) * 12000);
-    return out;
+    this.script = [["clap", 0], ["say", "a1", 35], ["clap", 120], ["say", "b1", -110], ["clap", -45], ["say", "a2", 0], ["clap", 180]];
+  }
+  clap(ang) {
+    const sig = new Float64Array(2048);
+    for (let i = 0; i < sig.length; i++) sig[i] = gauss() * Math.exp(-i / 250) * Math.min(1, i / 40);
+    return spatial(sig, ang, false, 12000, "peak");
+  }
+  next() {
+    const ev = this.script[this.k++ % this.script.length];
+    if (ev[0] === "say" && this.clips[ev[1]]) return { sig: spatial(this.clips[ev[1]], ev[2], false, 2500, "rms"), gap: 0.9 * FS };
+    return { sig: this.clap(ev[ev.length - 1]), gap: 1.0 * FS };
   }
   run(onData, onState) {
     onState("demo (no board)");
-    let seq = 0, k = 0, pending = null, pos = 0, nextClap = performance.now() + 1000;
+    this.k = 0;
+    const white = Float64Array.from({ length: 65536 }, gauss);
+    const fan = spatial(pinkish(white), 150, true, 500, "rms");
+    let seq = 0, made = 0, ev = null, pos = 0, wait = FS;
+    const t0 = performance.now();
     return new Promise((resolve) => {
       this.timer = setInterval(() => {
         if (this.closed) { clearInterval(this.timer); return resolve(); }
-        const frames = 128, pkt = new Uint8Array(10 + frames * CH * 2), dv = new DataView(pkt.buffer);
-        pkt.set([0xa5, 0x5a, 77, 56]);
-        dv.setUint32(4, seq++, true);
-        dv.setUint16(8, frames, true);
-        const now = performance.now();
-        if (now >= nextClap) {
-          pending = this.clap(this.angles[k++ % this.angles.length]);
-          pos = 0;
-          nextClap = now + 1400;
-        }
-        for (let f = 0; f < frames; f++) {
-          for (let c = 0; c < CH; c++) {
-            let v = c in model.geom ? gauss() * 25 : -30935;
-            if (pending && c in pending && pos + f < NFFT) v += pending[c][pos + f];
-            dv.setInt16(10 + (f * CH + c) * 2, Math.max(-32768, Math.min(32767, Math.round(v))), true);
+        const due = Math.min(((performance.now() - t0) / 1000) * FS - made, 128 * 20);
+        for (let done = 0; done + 128 <= due; done += 128) {
+          const frames = 128, pkt = new Uint8Array(10 + frames * CH * 2), dv = new DataView(pkt.buffer);
+          pkt.set([0xa5, 0x5a, 77, 56]);
+          dv.setUint32(4, seq++, true);
+          dv.setUint16(8, frames, true);
+          for (let f = 0; f < frames; f++) {
+            if (!ev && --wait <= 0) { ev = this.next(); pos = 0; }
+            const fi = (made + f) & 65535;
+            for (let c = 0; c < CH; c++) {
+              let v = -30935;
+              if (c in model.geom) {
+                v = gauss() * 25 + (fan[c] ? fan[c][fi] : 0);
+                if (ev && ev.sig[c]) v += ev.sig[c][pos];
+              }
+              dv.setInt16(10 + (f * CH + c) * 2, Math.max(-32768, Math.min(32767, Math.round(v))), true);
+            }
+            if (ev && ++pos >= ev.sig.len) { wait = ev.gap; ev = null; }
           }
+          made += frames;
+          onData(pkt);
         }
-        pos += frames;
-        if (pos >= NFFT) pending = null;
-        onData(pkt);
       }, 8);
     });
   }
@@ -547,6 +553,68 @@ class DemoConn {  // no board: claps from all round the array, through the curre
 
 function gauss() {
   return Math.sqrt(-2 * Math.log(Math.random() + 1e-12)) * Math.cos(2 * Math.PI * Math.random());
+}
+
+const ffts = new Map();
+const fftOf = (n) => ffts.get(n) || (ffts.set(n, makeFFT(n)), ffts.get(n));
+
+// Mono signal arriving from angle ang at every mic in the current layout (fractional delays in the
+// frequency domain), scaled so its peak or active-speech RMS is `level`.
+function spatial(sig, ang, circular, level, by) {
+  const pad = circular ? 0 : 32, n = 1 << Math.ceil(Math.log2(sig.length + 2 * pad)), f = fftOf(n);
+  const re = new Float64Array(n), im = new Float64Array(n);
+  re.set(sig, pad);
+  let ref = 0, cnt = 0;
+  for (const v of sig) {
+    if (by === "peak") ref = Math.max(ref, Math.abs(v));
+    else if (Math.abs(v) > 0.01) { ref += v * v; cnt++; }
+  }
+  ref = by === "peak" ? ref : Math.sqrt(ref / Math.max(1, cnt));
+  const gain = level / Math.max(ref, 1e-9) / n;
+  f(re, im);
+  const th = (ang * Math.PI) / 180, ux = Math.sin(th), uy = Math.cos(th), out = { len: circular ? n : sig.length + pad };
+  for (const [ch, [, x, y]] of Object.entries(model.geom)) {
+    const delay = -((x / 1000) * ux + (y / 1000) * uy) / C, r = new Float64Array(n), i = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+      const ph = -2 * Math.PI * ((k <= n / 2 ? k : k - n) * (FS / n)) * delay, c = Math.cos(ph), s = Math.sin(ph);
+      r[k] = re[k] * c - im[k] * s;
+      i[k] = -(re[k] * s + im[k] * c);  // conjugate, so the forward FFT acts as an inverse
+    }
+    f(r, i);
+    for (let k = 0; k < n; k++) r[k] *= gain;
+    if (!circular) r.fill(0, 0, pad - 8);  // fractional-delay ringing ahead of the onset
+    out[ch] = r;
+  }
+  return out;
+}
+
+// fan-like rush: white noise tilted toward low frequencies
+function pinkish(white) {
+  const n = white.length, f = fftOf(n), re = Float64Array.from(white), im = new Float64Array(n);
+  f(re, im);
+  for (let k = 0; k < n; k++) {
+    const hz = Math.max(60, Math.abs(k <= n / 2 ? k : k - n) * (FS / n)), g = Math.sqrt(60 / hz) * (hz > 6000 ? 0.3 : 1);
+    re[k] *= g;
+    im[k] = -im[k] * g;
+  }
+  f(re, im);
+  return re.map((v) => v / n);
+}
+
+function wavToFloat(buf) {
+  const dv = new DataView(buf);
+  let p = 12;
+  while (p + 8 <= dv.byteLength) {
+    const id = String.fromCharCode(dv.getUint8(p), dv.getUint8(p + 1), dv.getUint8(p + 2), dv.getUint8(p + 3));
+    const len = dv.getUint32(p + 4, true);
+    if (id === "data") {
+      const out = new Float64Array(len >> 1);
+      for (let i = 0; i < out.length; i++) out[i] = dv.getInt16(p + 8 + 2 * i, true) / 32768;
+      return out;
+    }
+    p += 8 + len + (len & 1);
+  }
+  throw new Error("no audio in wav");
 }
 
 // ------------------------------------------------------------------ app state
@@ -561,6 +629,7 @@ const parser = new Parser({
     if (lastSeq !== null && seq !== ((lastSeq + 1) >>> 0)) gaps++;
     lastSeq = seq;
     model.push(s, frames);
+    if (cap.on) runFocus(s, frames);
     pktTimes.push(performance.now());
   },
   wrong() { wrongFirmware = true; },
@@ -586,127 +655,389 @@ const sideText = (rel) => Math.abs(rel) < 2 ? "straight ahead" : Math.abs(rel) >
   : `${Math.abs(rel).toFixed(0)}° ${rel > 0 ? "left" : "right"}`;
 const fbText = (d) => d.fb === null ? "front/back unknown (no back mic)" : d.fb >= FB_SURE ? "front/back sure" : "front/back unsure";
 
-// ------------------------------------------------------------------ captions (browser speech recognition)
+// ------------------------------------------------------------------ voice focus (StreamingFocus from mic_caption_view.py)
 
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-const cap = { on: S.cc, lines: [], interim: null, rec: null, failed: "", lastFinal: "", local: false, note: "" };
-const capLang = () => navigator.language || "en-US";
+// MVDR beam toward the talker + Wiener hiss filter on 8 ms frames. It learns the background from quiet
+// frames and the talker from speech frames as it goes, so it follows whoever is talking.
+const FN = 512, FH = 128, FB = FN / 2 + 1, FK0 = 10, FK1 = 108, FLO = 3;  // band 300–3400 Hz; bins under 70 Hz dropped
+const fft512 = makeFFT(FN);
+const FWIN = Float64Array.from({ length: FN }, (_, i) => Math.sqrt(0.5 - 0.5 * Math.cos((2 * Math.PI * i) / FN)));
 
-// Chrome's on-device recognizer skips the round trip to Google's servers: quicker words, and no internet
-// needed. Older Chrome versions name the API differently, and many devices don't have it at all.
-async function prepareLocal() {
-  if (!Recognition || cap.localTried) return;
-  cap.localTried = true;
-  const lang = capLang();
-  try {
-    let state = "unavailable";
-    if (typeof Recognition.available === "function") {
-      state = await Recognition.available({ langs: [lang], processLocally: true });
-      if (state === "downloadable" && typeof Recognition.install === "function") {
-        cap.note = "downloading the on-device speech model…";
-        if (await Recognition.install({ langs: [lang], processLocally: true })) state = "available";
+function cSolve(Are, Aim, n, Bre, Bim, m) {  // complex A (n×n) X = B (n×m), row-major; Gaussian elimination
+  const ar = Float64Array.from(Are), ai = Float64Array.from(Aim), br = Float64Array.from(Bre), bi = Float64Array.from(Bim);
+  const swap = (a, w, r1, r2) => { for (let j = 0; j < w; j++) { const t = a[r1 * w + j]; a[r1 * w + j] = a[r2 * w + j]; a[r2 * w + j] = t; } };
+  for (let c = 0; c < n; c++) {
+    let p = c, best = -1;
+    for (let r = c; r < n; r++) {
+      const v = ar[r * n + c] ** 2 + ai[r * n + c] ** 2;
+      if (v > best) { best = v; p = r; }
+    }
+    if (p !== c) { swap(ar, n, p, c); swap(ai, n, p, c); swap(br, m, p, c); swap(bi, m, p, c); }
+    const pr = ar[c * n + c], pi = ai[c * n + c], den = pr * pr + pi * pi || 1e-30, ir = pr / den, ii = -pi / den;
+    for (let r = c + 1; r < n; r++) {
+      const xr = ar[r * n + c], xi = ai[r * n + c], fr = xr * ir - xi * ii, fi = xr * ii + xi * ir;
+      for (let j = c; j < n; j++) {
+        const yr = ar[c * n + j], yi = ai[c * n + j];
+        ar[r * n + j] -= fr * yr - fi * yi;
+        ai[r * n + j] -= fr * yi + fi * yr;
       }
-    } else if (typeof Recognition.availableOnDevice === "function") {
-      state = await Recognition.availableOnDevice(lang);
-      if (state === "downloadable" && typeof Recognition.installOnDevice === "function") {
-        cap.note = "downloading the on-device speech model…";
-        if (await Recognition.installOnDevice(lang)) state = "available";
+      for (let j = 0; j < m; j++) {
+        const yr = br[c * m + j], yi = bi[c * m + j];
+        br[r * m + j] -= fr * yr - fi * yi;
+        bi[r * m + j] -= fr * yi + fi * yr;
       }
     }
-    cap.local = state === "available";
-  } catch (e) { cap.local = false; }
-  cap.note = cap.local ? "on-device" : "online";
-  if (cap.local && cap.rec) {
-    try { cap.rec.abort(); } catch (e) { /* restarts on-device from onend */ }
+  }
+  for (let c = n - 1; c >= 0; c--) {
+    const pr = ar[c * n + c], pi = ai[c * n + c], den = pr * pr + pi * pi || 1e-30, ir = pr / den, ii = -pi / den;
+    for (let j = 0; j < m; j++) {
+      let sr = br[c * m + j], si = bi[c * m + j];
+      for (let k = c + 1; k < n; k++) {
+        const xr = br[k * m + j], xi = bi[k * m + j];
+        sr -= ar[c * n + k] * xr - ai[c * n + k] * xi;
+        si -= ar[c * n + k] * xi + ai[c * n + k] * xr;
+      }
+      br[c * m + j] = sr * ir - si * ii;
+      bi[c * m + j] = sr * ii + si * ir;
+    }
+  }
+  return [br, bi];
+}
+
+class Focus {
+  constructor(srcs) {
+    const n = (this.n = srcs.length), nn = n * n;
+    this.srcs = srcs.slice();
+    this.buf = srcs.map(() => new Float64Array(FN));
+    this.pend = srcs.map(() => new Float64Array(FH));
+    this.np = 0;
+    this.fill = 0;
+    this.Xre = srcs.map(() => new Float64Array(FN));
+    this.Xim = srcs.map(() => new Float64Array(FN));
+    this.Yre = new Float64Array(FN);
+    this.Yim = new Float64Array(FN);
+    this.ola = new Float64Array(FN);
+    this.RnRe = new Float64Array(FB * nn);
+    this.RnIm = new Float64Array(FB * nn);
+    for (let k = 0; k < FB; k++) for (let a = 0; a < n; a++) this.RnRe[k * nn + a * n + a] = 1e-6;
+    this.RsRe = Float64Array.from(this.RnRe);
+    this.RsIm = new Float64Array(FB * nn);
+    this.wRe = null;
+    this.Pn = new Float64Array(FB).fill(1e-3);
+    this.gPrev = new Float64Array(FB).fill(1);
+    this.postPrev = new Float64Array(FB).fill(1);
+    this.floor = null;
+    this.nNoise = this.nSpeech = this.frames = 0;
+    this.wide = [];
+    this.enabled = true;
+  }
+  push(s, frames, cb) {  // s: interleaved int16 packet
+    for (let i = 0; i < frames; i++) {
+      for (let q = 0; q < this.n; q++) this.pend[q][this.np] = s[i * CH + this.srcs[q]];
+      if (++this.np === FH) { this.np = 0; this.frame(cb); }
+    }
+  }
+  frame(cb) {
+    const n = this.n, nn = n * n;
+    for (let q = 0; q < n; q++) { this.buf[q].copyWithin(0, FH); this.buf[q].set(this.pend[q], FN - FH); }
+    this.fill = Math.min(FN, this.fill + FH);
+    if (this.fill < FN) return;
+    let eb = 0, ew = 0;
+    for (let q = 0; q < n; q++) {
+      const re = this.Xre[q], im = this.Xim[q], b = this.buf[q];
+      for (let i = 0; i < FN; i++) { re[i] = b[i] * FWIN[i]; im[i] = 0; }
+      fft512(re, im);
+      for (let k = FLO; k < FB; k++) {
+        const p = re[k] * re[k] + im[k] * im[k];
+        ew += p;
+        if (k >= FK0 && k <= FK1) eb += p;
+      }
+    }
+    const e = 10 * Math.log10(eb / (n * (FK1 - FK0 + 1)) + 1e-12), w = 10 * Math.log10(ew / (n * (FB - FLO)) + 1e-12);
+    if (this.floor === null) this.floor = e;
+    else if (e < this.floor) this.floor = 0.9 * this.floor + 0.1 * e;
+    else this.floor += 0.002;
+    const speech = e > this.floor + 8, quiet = e < this.floor + 3;
+    let bang = false;
+    if (this.wide.length === 40) {
+      const old = this.wide.slice(0, 37).sort((a, b) => a - b);
+      bang = w - old[18] > 22 && w - this.floor > 25;
+      this.wide.shift();
+    }
+    this.wide.push(w);
+    this.frames++;
+    const Yre = this.Yre, Yim = this.Yim;
+    if (this.enabled) {
+      if (quiet || speech) {
+        const Rre = quiet ? this.RnRe : this.RsRe, Rim = quiet ? this.RnIm : this.RsIm, a1 = quiet ? 0.99 : 0.98, a2 = 1 - a1;
+        for (let k = 0; k < FB; k++) {
+          const o = k * nn;
+          for (let a = 0; a < n; a++) {
+            const xr = this.Xre[a][k], xi = this.Xim[a][k];
+            for (let b = 0; b < n; b++) {
+              const yr = this.Xre[b][k], yi = this.Xim[b][k], j = o + a * n + b;
+              Rre[j] = a1 * Rre[j] + a2 * (xr * yr + xi * yi);
+              Rim[j] = a1 * Rim[j] + a2 * (xi * yr - xr * yi);
+            }
+          }
+        }
+        if (quiet) this.nNoise++; else this.nSpeech++;
+      }
+      if (this.frames % 32 === 0 && this.nNoise > 100 && this.nSpeech > 30) this.updateWeights();
+      for (let k = 0; k < FB; k++) {
+        let yr = 0, yi = 0;
+        for (let q = 0; q < n; q++) {
+          const xr = this.Xre[q][k], xi = this.Xim[q][k];
+          if (this.wRe) {
+            const wr = this.wRe[k * n + q], wi = this.wIm[k * n + q];
+            yr += wr * xr + wi * xi;
+            yi += wr * xi - wi * xr;
+          } else { yr += xr / n; yi += xi / n; }
+        }
+        if (k < FLO) yr = yi = 0;
+        const py = yr * yr + yi * yi;
+        if (quiet) this.Pn[k] = 0.98 * this.Pn[k] + 0.02 * py;
+        const post = py / (this.Pn[k] + 1e-12);
+        const prio = 0.98 * this.gPrev[k] ** 2 * this.postPrev[k] + 0.02 * Math.max(post - 1, 0);
+        const g = Math.max(prio / (1 + prio), 0.12);
+        this.gPrev[k] = g;
+        this.postPrev[k] = post;
+        Yre[k] = yr * g;
+        Yim[k] = yi * g;
+      }
+    } else {
+      for (let k = 0; k < FB; k++) {
+        let yr = 0, yi = 0;
+        for (let q = 0; q < n; q++) { yr += this.Xre[q][k] / n; yi += this.Xim[q][k] / n; }
+        Yre[k] = k < FLO ? 0 : yr;
+        Yim[k] = k < FLO ? 0 : yi;
+      }
+    }
+    Yim[0] = Yim[FN / 2] = 0;
+    for (let k = FB; k < FN; k++) { Yre[k] = Yre[FN - k]; Yim[k] = Yim[FN - k]; }  // conjugated already for the inverse
+    for (let k = 1; k < FB - 1; k++) Yim[k] = -Yim[k];
+    fft512(Yre, Yim);
+    for (let i = 0; i < FN; i++) this.ola[i] += ((Yre[i] / FN) * FWIN[i]) / 2;  // sqrt-Hann in and out, 75% overlap
+    const out = this.ola.slice(0, FH);
+    this.ola.copyWithin(0, FH);
+    this.ola.fill(0, FN - FH);
+    cb(out, speech, bang, e - this.floor);
+  }
+  updateWeights() {
+    const n = this.n, nn = n * n;
+    if (!this.wRe) {
+      this.wRe = new Float64Array(FB * n);
+      this.wIm = new Float64Array(FB * n);
+      this.vRe = new Float64Array(FB * n).fill(1);
+      this.vIm = new Float64Array(FB * n);
+    }
+    const Nre = new Float64Array(nn), Nim = new Float64Array(nn);
+    for (let k = 0; k < FB; k++) {
+      const o = k * nn;
+      let tr = 0;
+      for (let a = 0; a < n; a++) tr += this.RnRe[o + a * n + a];
+      const load = (1e-3 * tr) / n + 1e-12;
+      for (let j = 0; j < nn; j++) { Nre[j] = this.RnRe[o + j]; Nim[j] = this.RnIm[o + j]; }
+      for (let a = 0; a < n; a++) Nre[a * n + a] += load;
+      // talker steering vector: principal generalized eigenvector of (Rs, Rn), by power iteration
+      const [Mre, Mim] = cSolve(Nre, Nim, n, this.RsRe.subarray(o, o + nn), this.RsIm.subarray(o, o + nn), n);
+      let vr = this.vRe.slice(k * n, k * n + n), vi = this.vIm.slice(k * n, k * n + n);
+      for (let it = 0; it < 12; it++) {
+        const ur = new Float64Array(n), ui = new Float64Array(n);
+        let norm = 0;
+        for (let a = 0; a < n; a++) {
+          for (let b = 0; b < n; b++) {
+            const mr = Mre[a * n + b], mi = Mim[a * n + b];
+            ur[a] += mr * vr[b] - mi * vi[b];
+            ui[a] += mr * vi[b] + mi * vr[b];
+          }
+          norm += ur[a] * ur[a] + ui[a] * ui[a];
+        }
+        norm = Math.sqrt(norm) || 1;
+        for (let a = 0; a < n; a++) { ur[a] /= norm; ui[a] /= norm; }
+        vr = ur;
+        vi = ui;
+      }
+      this.vRe.set(vr, k * n);
+      this.vIm.set(vi, k * n);
+      const dr = new Float64Array(n), di = new Float64Array(n);
+      for (let a = 0; a < n; a++) {
+        for (let b = 0; b < n; b++) {
+          dr[a] += Nre[a * n + b] * vr[b] - Nim[a * n + b] * vi[b];
+          di[a] += Nre[a * n + b] * vi[b] + Nim[a * n + b] * vr[b];
+        }
+      }
+      const d0 = dr[0] * dr[0] + di[0] * di[0];
+      if (d0 > 1e-24) {
+        const ir = dr[0] / d0, ii = -di[0] / d0;
+        for (let a = n - 1; a >= 0; a--) {
+          const xr = dr[a], xi = di[a];
+          dr[a] = xr * ir - xi * ii;
+          di[a] = xr * ii + xi * ir;
+        }
+      }
+      const [Rr, Ri] = cSolve(Nre, Nim, n, dr, di, 1);
+      let sr = 1e-12, si = 0;
+      for (let a = 0; a < n; a++) { sr += dr[a] * Rr[a] + di[a] * Ri[a]; si += dr[a] * Ri[a] - di[a] * Rr[a]; }
+      const den = sr * sr + si * si;
+      for (let a = 0; a < n; a++) {
+        this.wRe[k * n + a] = (Rr[a] * sr + Ri[a] * si) / den;
+        this.wIm[k * n + a] = (Ri[a] * sr - Rr[a] * si) / den;
+      }
+    }
   }
 }
 
-function speechAngle() {
-  const d = model.last;
-  return d && model.now - d.t < 2.5 ? d.angle : null;
+// ------------------------------------------------------------------ captions (offline, from the focused array audio)
+
+const MODEL_URL = "models/vosk-model-small-en-us-0.15.tar.gz";
+const JUNK = new Set(["the", "a", "huh", "uh", "um", "hm", "oh"]);
+const cap = { on: S.cc, lines: [], interim: null, gain: 20, lastBang: 0, voiceUntil: 0 };
+const asr = { rec: null, loading: false, status: "", buf: new Float32Array(1024), n: 0, fed: 0 };
+let focus = null;
+
+// Talker direction: voice-band SRP on the frames voice focus marks as speech, each frame's curve
+// normalised so one loud frame can't outvote the rest, stamped with the recognizer's audio clock.
+// A caption takes the direction from exactly the time span of its words, so it stays right even when
+// the recognizer runs behind. (Quiet speech under a fan never trips the clap-style detector, so this
+// can't come from model.last.)
+const utt = { log: [], tick: 0, skip: 0, lastEnd: 0 };
+
+function trackSpeechDir(weight) {
+  const act = model.active();
+  if (act.length < 2) return;
+  const st = model.steering(act.map((a) => a[0]), 3400);
+  const c = model.srp(act.map((a) => a[1]), st), sorted = Array.from(c).sort((a, b) => a - b);
+  const med = (sorted[179] + sorted[180]) / 2, span = Math.max(sorted[359] - med, 1e-9);
+  const curve = new Float32Array(360);
+  for (let k = 0; k < 360; k++) curve[k] = (weight * (c[k] - med)) / span;
+  const t = asr.fed / FS;
+  utt.log.push({ t, curve, back: st.hasBack });
+  while (utt.log.length && t - utt.log[0].t > 60) utt.log.shift();
 }
 
-function addLine(text, angle) {
+function speechCurve(t0 = utt.lastEnd, t1 = Infinity) {
+  const sum = new Float64Array(360);
+  let n = 0, back = true;
+  for (const e of utt.log) {
+    if (e.t < t0 || e.t > t1) continue;
+    for (let k = 0; k < 360; k++) sum[k] += e.curve[k];
+    back = e.back;
+    n++;
+  }
+  return { sum, n, back };
+}
+
+function speechAngle(t0, t1) {
+  const { sum, n, back } = speechCurve(t0, t1);
+  if (!n) return null;
+  let k = 0;
+  for (let i = 1; i < 360; i++) if (sum[i] > sum[k]) k = i;
+  let a = k - 180;
+  if (!back && Math.abs(a) > 90) a = Math.sign(a) * (180 - Math.abs(a));
+  return a;
+}
+
+const tidy = (t) => {
+  t = t.replace(/\bi\b/g, "I").replace(/\bi'(m|ll|ve|d)\b/g, "I'$1");
+  return t.charAt(0).toUpperCase() + t.slice(1);
+};
+
+// t0/t1: the words' times on the recognizer's audio clock, so a short pause mid-sentence joins the line
+// even when results arrive late and bunched up
+function addLine(text, angle, kind = "speech", t0 = null, t1 = null) {
   const now = performance.now() / 1000, last = cap.lines[cap.lines.length - 1];
-  if (last && now - last.wall < 2.5 && last.text.length + text.length < 160) {
+  const sameTalker = last && (angle === null || last.angle === null || Math.abs(wrap(angle - last.angle)) < 25);
+  if (kind === "speech" && last && last.kind === "speech" && sameTalker && t0 !== null && last.t1 !== null
+      && t0 - last.t1 < 1.5 && last.text.length + text.length < 160) {
     last.text += " " + text;
     last.wall = now;
-    if (angle !== null) last.angle = angle;
+    last.t1 = t1;
   } else {
-    cap.lines.push({ wall: now, text, angle });
-    if (cap.lines.length > 60) cap.lines.shift();
+    cap.lines.push({ wall: now, text, angle, kind, t1 });
+    if (cap.lines.length > 200) cap.lines.shift();
   }
 }
 
-function capStart() {
-  if (!Recognition) {
-    cap.failed = "no speech recognition in this browser: use Chrome, or turn on Live Caption in Android settings";
-    return;
-  }
-  if (cap.rec) return;
-  const r = new Recognition();
-  r.continuous = true;
-  r.interimResults = true;
-  r.maxAlternatives = 1;
-  r.lang = capLang();
-  if (cap.local) {
-    try {
-      if ("processLocally" in r) r.processLocally = true;
-      else if ("mode" in r) r.mode = "ondevice-preferred";
-    } catch (e) { /* stays online */ }
-  }
-  r.onresult = (e) => {
-    let fin = "", intr = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) fin += t; else intr += t;
-    }
-    const a = speechAngle();
-    fin = fin.trim();
-    // Android Chrome repeats earlier results in continuous mode; keep only what's new
-    if (fin && cap.lastFinal && fin.startsWith(cap.lastFinal)) fin = fin.slice(cap.lastFinal.length).trim();
-    if (fin) { addLine(fin, a); cap.lastFinal = (cap.lastFinal + " " + fin).trim().slice(-400); }
-    intr = intr.trim();
-    cap.interim = intr ? { text: intr, angle: a } : null;
-  };
-  r.onerror = (e) => {
-    if (cap.local && (e.error === "language-not-supported" || e.error === "service-not-allowed")) {
-      cap.local = false;
-      cap.note = "online";
-    } else if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      cap.failed = "microphone blocked for this page: allow it in Chrome's site settings, or use Live Caption";
-      cap.on = false;
-      uiSync();
-    }
-  };
-  const started = performance.now();
-  r.onend = () => {
-    cap.rec = null;
-    // a session cut off mid-phrase never sends the final result; keep the words already shown
-    if (cap.interim && cap.on) addLine(cap.interim.text, cap.interim.angle);
-    cap.interim = null;
-    cap.lastFinal = "";
-    cap.quickEnds = performance.now() - started < 1500 ? (cap.quickEnds || 0) + 1 : 0;
-    if (cap.quickEnds >= 6) {
-      cap.failed = "speech recognition keeps stopping here: use Chrome, or Android Live Caption";
-      cap.quickEnds = 0;
-      return;
-    }
-    if (cap.on && !cap.failed) capStart();  // Android stops after every pause; words in a restart gap are lost
-  };
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`couldn't load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+async function asrLoad() {
+  if (asr.rec || asr.loading) return;
+  asr.loading = true;
+  asr.status = "loading the speech model (41 MB the first time, then kept on this device)…";
   try {
-    r.start();
-    cap.rec = r;
-    cap.failed = "";
+    if (!window.Vosk) await loadScript("lib/vosk.js");
+    // the model is cached under its URL inside the recognizer's worker, so the URL has to stay the same
+    const vm = await Vosk.createModel(new URL(MODEL_URL, location.href).href, -1);
+    const rec = new vm.KaldiRecognizer(FS);
+    rec.on("partialresult", (m) => {
+      const t = (m.result.partial || "").trim();
+      cap.interim = t && !JUNK.has(t) ? { text: tidy(t), angle: speechAngle() } : null;
+    });
+    rec.on("result", (m) => {
+      const t = (m.result.text || "").trim(), words = m.result.result || [];
+      cap.interim = null;
+      if (!words.length) return;
+      const t0 = words[0].start, t1 = words[words.length - 1].end;
+      // directions are stamped when a frame leaves voice focus, but measured on the newest input, about
+      // one focus window (32 ms) ahead of it
+      if (t && !JUNK.has(t)) addLine(tidy(t), speechAngle(t0 - 0.1 - FN / FS, t1 + 0.1), "speech", t0, t1);
+      utt.lastEnd = t1;
+    });
+    rec.setWords(true);
+    asr.rec = rec;
+    asr.status = "";
   } catch (e) {
-    cap.failed = "speech recognition didn't start: " + e.message;
+    asr.status = `speech model didn't load: ${e.message || e}`;
+  }
+  asr.loading = false;
+}
+
+function onFocusFrame(out, speech, bang, overFloor) {
+  if (speech) {
+    let s = 0;
+    for (let i = 0; i < FH; i++) s += out[i] * out[i];
+    const target = Math.min(400, Math.max(1, 3000 / (Math.sqrt(s / FH) + 1e-9)));
+    cap.gain = 0.98 * cap.gain + 0.02 * target;
+  }
+  cap.voiceUntil = bang || utt.skip > 0 ? 0 : speech ? performance.now() + 150 : cap.voiceUntil;
+  if (bang) utt.skip = 30;  // a clap is loud enough to count as speech; keep it out of the talker's direction
+  if (utt.skip > 0) utt.skip--;
+  else if (speech && asr.rec && ++utt.tick % 4 === 0) trackSpeechDir(Math.min(1, Math.max(0.1, (overFloor - 8) / 12)));
+  const now = performance.now();
+  if (bang && now - cap.lastBang > 600) {
+    cap.lastBang = now;
+    setTimeout(() => {  // let the direction finder catch it first
+      const d = model.last;
+      addLine("[BANG]", d && model.now - d.t < 0.5 ? d.angle : null, "sound");
+    }, 150);
+  }
+  if (!asr.rec) return;
+  const g = cap.gain / 32768;
+  asr.fed += FH;
+  for (let i = 0; i < FH; i++) {
+    asr.buf[asr.n++] = Math.max(-1, Math.min(1, out[i] * g));
+    if (asr.n === asr.buf.length) {
+      asr.rec.acceptWaveformFloat(asr.buf, FS);
+      asr.n = 0;
+    }
   }
 }
 
-function capStop() {
-  try { cap.rec?.stop(); } catch (e) { /* ignore */ }
-  cap.rec = null;
-  cap.interim = null;
+function runFocus(s, frames) {
+  const srcs = model.active().map((a) => a[1]);
+  if (!srcs.length) return;
+  if (!focus || focus.srcs.join() !== srcs.join()) focus = new Focus(srcs);
+  focus.enabled = S.focus;
+  focus.push(s, frames, onFocusFrame);
 }
 
 // ------------------------------------------------------------------ drawing
@@ -1109,13 +1440,15 @@ function drawLevels(r) {
 
 function drawTranscript(r) {
   panel(r, "Transcript");
-  const state = cap.failed ? cap.failed : !Recognition ? "no speech recognition"
-    : cap.on ? `${cap.rec ? "listening" : "starting…"}${cap.note ? " · " + cap.note : ""}` : "captions off";
+  const failed = asr.status.startsWith("speech model didn't");
+  const mics = focus ? `${focus.n} mic${focus.n === 1 ? "" : "s"}` : "waiting for mics";
+  const state = !cap.on ? "captions off" : asr.status ? (failed ? "speech model failed" : "loading speech model…")
+    : `offline · ${S.focus ? (focus && focus.wRe ? "voice focus" : "voice focus learning") : "plain mix"} · ${mics}`;
   ctx.font = font(11);
   let st = state;
   while (st.length > 4 && ctx.measureText(st).width > r.w - 120) st = st.slice(0, -2);
   if (st !== state) st = st.trimEnd() + "…";
-  text(st, r.r - 14, r.y + 18, 11, cap.failed ? LOUD : DIM, "right");
+  text(st, r.r - 14, r.y + 18, 11, failed ? LOUD : DIM, "right");
   const inner = R(r.x + 14, r.y + 34, r.w - 28, r.h - 44);
   ctx.save();
   ctx.beginPath();
@@ -1140,16 +1473,16 @@ function drawTranscript(r) {
     ctx.font = font(14);
     const lines = wrapLines(ln.text, inner.w);
     y -= lines.length * 18;
-    lines.forEach((l, j) => text(l, inner.x, y + j * 18 + 9, 14, INK));
+    lines.forEach((l, j) => text(l, inner.x, y + j * 18 + 9, 14, ln.kind === "sound" ? LOUD : INK, "left", ln.kind === "sound"));
     const [rel, side] = where(ln.angle);
     const t = new Date(performance.timeOrigin + ln.wall * 1000).toLocaleTimeString();
     y -= 16;
     text(`${t}${rel === null ? "" : ` · ${sideText(rel)}${side === "in" ? "" : " (off screen)"}`}`, inner.x, y + 7, 11, DIM);
     y -= 8;
   }
-  if (!cap.lines.length && cap.failed) {
+  if (!cap.lines.length && cap.on && asr.status) {
     ctx.font = font(13);
-    wrapLines(cap.failed, inner.w - 20).forEach((l, j) => text(l, inner.cx, inner.cy + j * 18, 13, LOUD, "center"));
+    wrapLines(asr.status, inner.w - 20).forEach((l, j) => text(l, inner.cx, inner.cy + j * 18, 13, failed ? LOUD : DIM, "center"));
   } else if (!cap.lines.length && !cap.interim) {
     text(cap.on ? "say something" : "tap CC for subtitles", inner.cx, inner.cy, 14, DIM, "center");
   }
@@ -1199,7 +1532,7 @@ setInterval(() => {
   $("conn").title = boardStats || boardMsg;
 }, 500);
 
-setInterval(() => model.tick(S.thr), 33);
+setInterval(() => model.tick(S.thr, performance.now() < cap.voiceUntil), 33);
 
 // ------------------------------------------------------------------ controls
 
@@ -1207,6 +1540,7 @@ const hint = (t) => { $("hint").textContent = t; };
 
 function uiSync() {
   $("cc").classList.toggle("on", cap.on);
+  $("focus").classList.toggle("on", S.focus);
   $("swaplr").classList.toggle("on", S.swap);
   $("swapfb").classList.toggle("on", S.swapfb);
   $("mirror").classList.toggle("on", S.mirror);
@@ -1272,10 +1606,11 @@ $("cc").onclick = () => {
   cap.on = !cap.on;
   S.cc = cap.on;
   save();
-  cap.failed = "";
-  if (cap.on) { capStart(); prepareLocal(); } else capStop();
+  cap.interim = null;
+  if (cap.on) asrLoad();
   uiSync();
 };
+$("focus").onclick = () => { S.focus = !S.focus; save(); uiSync(); };
 
 async function connect(c) {
   const why = $("why");
@@ -1295,7 +1630,7 @@ async function connect(c) {
   lastSeq = null;
   gaps = 0;
   $("connect").classList.add("hidden");
-  if (cap.on) capStart();
+  focus = null;
   await c.run((data) => parser.feed(data), (s) => { connState = s; });
   if (conn === c) {
     conn = null;
@@ -1320,10 +1655,9 @@ $("go").onclick = () => {
       : "USB needs a secure page: open this from its https:// address (or localhost).";
     return;
   }
-  prepareLocal();
   connect(c);
 };
-$("demo").onclick = () => { prepareLocal(); connect(new DemoConn()); };
+$("demo").onclick = () => connect(new DemoConn());
 $("disconnect").onclick = async () => {
   const c = conn;
   conn = null;
@@ -1341,5 +1675,7 @@ if (!("serial" in navigator) && !("usb" in navigator)) {
 uiSync();
 resize();
 requestAnimationFrame(render);
+if (cap.on) asrLoad();
+if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
 if (params.get("ws")) connect(new WsConn(params.get("ws")));
 else if (params.has("demo")) connect(new DemoConn());

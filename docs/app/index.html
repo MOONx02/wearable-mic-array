@@ -6,6 +6,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1117">
 <title>Mic array 360</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
 <style>
   html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3;
     font: 14px -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; overflow: hidden;
@@ -39,7 +41,8 @@
 </head>
 <body>
 <div id="bar">
-  <button id="cc" class="on" title="Live subtitles (Chrome speech recognition, phone/tablet mic)">CC</button>
+  <button id="cc" class="on" title="Live subtitles from the mic array, recognised offline on this device">CC</button>
+  <button id="focus" class="on" title="Voice focus: beamform the array toward the talker and filter out the background">Voice focus</button>
   <button id="centre" title="Clap straight in front of the camera, then press this">Set centre</button>
   <button id="edge" title="Clap at the right edge of the picture, then press this">Right edge</button>
   <button id="swaplr">Swap L/R</button>

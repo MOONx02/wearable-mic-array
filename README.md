@@ -27,6 +27,13 @@ grown to an 8-mic array around the torso for full 360° direction finding.
 - **SD take pipeline:** import a recording, compute directions, voice focus, transcript and MP4, then review it in a take viewer.
 - **Bench tools:** a live one-mic tester, 8-channel capture with dead/stuck-line detection, and generated breadboard wiring diagrams.
 
+**Tablet / phone app (browser, no install)**: [open it](https://moonx02.github.io/wearable-mic-array/app/)
+- Plug the board into an Android tablet's USB-C port and open the page in Chrome: it reads the same USB stream (WebUSB / Web Serial) and runs the 360° SRP-PHAT direction finder in JavaScript.
+- Camera with the direction glow and edge arrows, 360° radar, mic levels, two-clap calibration.
+- **Subtitles from the array, fully offline:** the same voice focus as the laptop app (MVDR beam + Wiener filter, ported to JavaScript and checked against the Python: correlation 0.9999) feeds an on-device recogniser ([Vosk](https://github.com/alphacep/vosk-api) in WebAssembly, small English model). Words appear while the talker speaks; each line is placed by the talker's direction, measured over exactly the time span of its words.
+- After the first visit it needs no internet at all (the page, recogniser and model are kept on the device), and nothing leaves the tablet.
+- Works without a board too: tap **Demo** for recorded speech and claps from around the array over a fan. Source: [`docs/app/`](docs/app/).
+
 **HUD prototype**: a heads-up display design run on a simulated 8-mic recording
 (room acoustics simulation, SRP-PHAT radar, steerable MVDR beam), with a standalone
 browser version. See [`hud/`](hud/).
@@ -55,6 +62,7 @@ Details, method and before/after spectrograms: [`esp32s3/README.md`](esp32s3/REA
 - [ ] **6 mics**: replace the two faulty mics, giving 4 front + 2 back.
 - [ ] **8 mics**: add the two shoulder mics ([wiring](docs/planning/eight-mic-wiring.md)), measure the real mic positions, calibrate per-mic delays.
 - [ ] **Voice focus and captions on the full array**, steering the beam in 360°.
+- [x] **Tablet display**: the 360° view in Chrome on an Android tablet over USB, instead of a laptop.
 - [ ] **Untethered**: Wi-Fi audio/take upload, battery power, vest firmware tasks (beam, loud-event alerts, push-to-talk) from [`vest_rtos_skeleton`](esp32s3/vest_rtos_skeleton/vest_rtos_skeleton.ino).
 - [ ] **On the vest**: harness, enclosure, and the HUD running on real recordings.
 
@@ -65,6 +73,7 @@ Details, method and before/after spectrograms: [`esp32s3/README.md`](esp32s3/REA
 | [`esp32s3/`](esp32s3/) | Firmware sketches, laptop apps, tools, wiring diagrams, full write-up |
 | [`esp32s3/CAMERA_AND_CAPTIONS.md`](esp32s3/CAMERA_AND_CAPTIONS.md) | Firmware flow, USB packet format, offline proof |
 | [`hud/`](hud/) | HUD prototype and the 8-mic simulation |
+| [`docs/app/`](docs/app/) | Browser app for an Android tablet over USB ([live](https://moonx02.github.io/wearable-mic-array/app/)) |
 | [`docs/planning/`](docs/planning/) | 8-mic wiring plan, array layout study, accuracy study |
 
 ## Hardware
@@ -97,5 +106,10 @@ python3 mic_camera_view360.py --geometry array_5mic_rear_centre.json   # 360° d
 python3 mic_camera_view360.py --demo                                   # no board needed
 python3 mic_caption_view.py                                            # 4-mic voice focus + captions
 ```
+
+Tablet: plug the board into an Android tablet, open
+<https://moonx02.github.io/wearable-mic-array/app/> in Chrome, tap **Connect USB** and pick the board.
+The first visit downloads the 41 MB speech model; after that it works offline.
+Bundled: `vosk-browser` 0.0.8 and `vosk-model-small-en-us-0.15` (both Apache-2.0).
 
 More options, calibration and the 4-mic setup are in [`esp32s3/README.md`](esp32s3/README.md#running-it).
