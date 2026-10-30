@@ -122,6 +122,7 @@ class Model {
 
   tick(thr, voice = false) {
     if (this.total < FS / 10) return;
+    this.ticks = (this.ticks || 0) + 1;
     for (let c = 0; c < CH; c++) {
       const blk = this.tail(c, 800, this.blk);
       let m = 0;
@@ -138,7 +139,7 @@ class Model {
       if (hist.length > 150) hist.shift();
       const sorted = hist.slice().sort((a, b) => a - b);
       this.floor[c] = sorted[Math.floor(sorted.length * 0.1)];
-      if (this.total < FS / 2) continue;
+      if (this.total < FS / 2 || this.ticks % 15) continue;  // the dead-line check looks at 0.5 s anyway
       const h = this.tail(c, FS / 2, this.half);
       let lo = Infinity, hi = -Infinity, same = 0;
       for (let i = 0; i < h.length; i++) {
@@ -304,8 +305,7 @@ class Parser {
         if (frames === 0 || frames > 4096) { p += 2; continue; }
         const end = p + 10 + frames * CH * 2;
         if (end > n) break;
-        const s = new Int16Array(frames * CH);
-        for (let i = 0, o = p + 10; i < s.length; i++, o += 2) s[i] = dv.getInt16(o, true);
+        const s = new Int16Array(b.buffer.slice(b.byteOffset + p + 10, b.byteOffset + end));  // little-endian host
         this.on.mic(seq, frames, s);
         p = end;
       } else if (k0 === 77 && k1 === 52) {  // 'M4': the 4-mic firmware
@@ -444,7 +444,8 @@ class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
       onState("streaming");
       const ep = this.data.inEp, q = [];
       try {
-        for (let i = 0; i < 4; i++) q.push(this.dev.transferIn(ep, 16384));
+        // several large reads queued, so the board's buffer keeps draining even when the page is busy
+        for (let i = 0; i < 12; i++) q.push(this.dev.transferIn(ep, 16384));
         for (;;) {
           const r = await q.shift();
           if (this.closed) return;
@@ -519,9 +520,29 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
     const fan = spatial(pinkish(white), 150, true, 500, "rms");
     let seq = 0, made = 0, ev = null, pos = 0, wait = FS;
     const t0 = performance.now();
+    const cam = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(320, 240) : null;
+    let camSeq = 0, camBusy = false, nextCam = 0;
     return new Promise((resolve) => {
       this.timer = setInterval(() => {
         if (this.closed) { clearInterval(this.timer); return resolve(); }
+        if (cam && !camBusy && performance.now() >= nextCam) {  // 10 fps JPEG, like the board's camera
+          nextCam = performance.now() + 100;
+          camBusy = true;
+          demoPicture(cam.getContext("2d"), made / FS);
+          cam.convertToBlob({ type: "image/jpeg", quality: 0.6 })
+            .then((blob) => blob.arrayBuffer())
+            .then((ab) => {
+              const j = new Uint8Array(ab), pkt = new Uint8Array(16 + j.length), dv = new DataView(pkt.buffer);
+              pkt.set([0xa5, 0x5a, 74, 80]);
+              dv.setUint32(4, camSeq++, true);
+              dv.setUint32(8, j.length, true);
+              dv.setUint16(12, 320, true);
+              dv.setUint16(14, 240, true);
+              pkt.set(j, 16);
+              if (!this.closed) onData(pkt);
+            })
+            .finally(() => { camBusy = false; });
+        }
         const due = Math.min(((performance.now() - t0) / 1000) * FS - made, 128 * 20);
         for (let done = 0; done + 128 <= due; done += 128) {
           const frames = 128, pkt = new Uint8Array(10 + frames * CH * 2), dv = new DataView(pkt.buffer);
@@ -549,6 +570,27 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
   }
   async send() {}
   async close() { this.closed = true; }
+}
+
+function demoPicture(g, t) {
+  const sky = g.createLinearGradient(0, 0, 0, 240);
+  sky.addColorStop(0, "#2d3b4e");
+  sky.addColorStop(1, "#141a22");
+  g.fillStyle = sky;
+  g.fillRect(0, 0, 320, 240);
+  g.strokeStyle = "#3a4656";
+  for (let i = -6; i <= 6; i++) {
+    g.beginPath();
+    g.moveTo(160 + i * 12, 150);
+    g.lineTo(160 + i * 60, 240);
+    g.stroke();
+  }
+  const x = 160 + 120 * Math.sin(t * 0.8);
+  g.fillStyle = "#e3b341";
+  g.fillRect(x - 6, 70, 12, 80);
+  g.fillStyle = "#e6edf3";
+  g.font = "14px sans-serif";
+  g.fillText(`demo camera  ${t.toFixed(1)} s`, 10, 20);
 }
 
 function gauss() {
@@ -622,7 +664,8 @@ function wavToFloat(buf) {
 const model = new Model();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
 let image = null, decoding = false, lastSeq = null, gaps = 0;
-const pktTimes = [], frameTimes = [];
+const pktTimes = [], frameTimes = [], rxTimes = [];
+const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
 
 const parser = new Parser({
   mic(seq, frames, s) {
@@ -634,6 +677,7 @@ const parser = new Parser({
   },
   wrong() { wrongFirmware = true; },
   jpeg(bytes) {
+    rxTimes.push(performance.now());
     if (decoding) return;
     decoding = true;
     createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
@@ -944,19 +988,97 @@ const tidy = (t) => {
 };
 
 // t0/t1: the words' times on the recognizer's audio clock, so a short pause mid-sentence joins the line
-// even when results arrive late and bunched up
+// even when results arrive late and bunched up. Returns the piece, so Moonshine can swap its words later.
 function addLine(text, angle, kind = "speech", t0 = null, t1 = null) {
   const now = performance.now() / 1000, last = cap.lines[cap.lines.length - 1];
   const sameTalker = last && (angle === null || last.angle === null || Math.abs(wrap(angle - last.angle)) < 25);
+  let line;
   if (kind === "speech" && last && last.kind === "speech" && sameTalker && t0 !== null && last.t1 !== null
       && t0 - last.t1 < 1.5 && last.text.length + text.length < 160) {
-    last.text += " " + text;
-    last.wall = now;
-    last.t1 = t1;
+    line = last;
+    line.wall = now;
+    line.t1 = t1;
   } else {
-    cap.lines.push({ wall: now, text, angle, kind, t1 });
+    line = { wall: now, text: "", parts: [], angle, kind, t1 };
+    cap.lines.push(line);
     if (cap.lines.length > 200) cap.lines.shift();
   }
+  const part = { text, line };
+  line.parts.push(part);
+  line.text = line.parts.map((p) => p.text).join(" ");
+  return part;
+}
+
+function setPart(part, text) {
+  part.text = text;
+  part.line.text = part.line.parts.map((p) => p.text).join(" ");
+}
+
+// Better words: Vosk shows text instantly, then Moonshine base (about as accurate as Whisper base.en)
+// re-reads each finished sentence from the same focused audio and replaces it.
+const HQ_URL = "asr_worker.js";
+const hq = { worker: null, ready: false, status: "", queue: [], busy: null, id: 0, ring: new Float32Array(FS * 40), last: "" };
+
+function hqLoad() {
+  if (hq.worker || typeof Worker === "undefined") return;
+  try {
+    hq.worker = new Worker(HQ_URL, { type: "module" });
+  } catch (e) {
+    hq.status = "better words unavailable";
+    return;
+  }
+  hq.status = "loading better words…";
+  hq.worker.onmessage = ({ data: m }) => {
+    if (hq.failed) return;
+    if (m.type === "progress") hq.status = `loading better words ${m.mb.toFixed(0)}/${m.total.toFixed(0)} MB (first time only)`;
+    else if (m.type === "stage") hq.status = m.text;
+    else if (m.type === "ready") { hq.ready = true; hq.status = ""; hq.threads = m.threads; hqNext(); }
+    else if (m.type === "error") {
+      console.warn("moonshine:", m.message);
+      if (!hq.ready) { hq.failed = true; hq.status = "better words didn't load"; }
+    }
+    else if (m.type === "done") {
+      const job = hq.busy;
+      hq.busy = null;
+      if (job && job.id === m.id && plausible(m.text, m.sec)) setPart(job.part, m.text);
+      hq.last = `${(m.ms / 1000).toFixed(1)} s for ${m.sec.toFixed(1)} s`;
+      hqNext();
+    }
+  };
+  hq.worker.onerror = (e) => { hq.status = "better words didn't load"; console.warn("moonshine worker:", e.message); };
+  hq.worker.postMessage({ type: "load" });
+}
+
+// Moonshine can loop on noise ("the the the …"); keep Vosk's words then
+function plausible(text, sec) {
+  const w = text.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
+  if (!w.length || w.length > 5 * sec + 4) return false;
+  const seen = new Map();
+  for (let i = 0; i + 2 < w.length; i++) {
+    const k = w.slice(i, i + 3).join(" ");
+    seen.set(k, (seen.get(k) || 0) + 1);
+    if (seen.get(k) >= 3) return false;
+  }
+  return true;
+}
+
+function hqSubmit(part, t0, t1) {
+  if (!hq.worker) return;
+  const ring = hq.ring, L = ring.length;
+  const s0 = Math.max(Math.round((t0 - 0.3) * FS), asr.fed - L + 1, 0), s1 = Math.min(Math.round((t1 + 0.3) * FS), asr.fed);
+  if (s1 - s0 < FS * 0.25) return;
+  const pad = Math.max(0, Math.ceil((FS - (s1 - s0)) / 2));  // at least 1 s, padded with silence
+  const audio = new Float32Array(s1 - s0 + 2 * pad);
+  for (let i = s0; i < s1; i++) audio[pad + i - s0] = ring[i % L];
+  hq.queue.push({ id: ++hq.id, part, audio });
+  while (hq.queue.length > 4) hq.queue.shift();  // falling behind: the oldest keeps Vosk's words
+  hqNext();
+}
+
+function hqNext() {
+  if (!hq.ready || hq.busy || !hq.queue.length) return;
+  hq.busy = hq.queue.shift();
+  hq.worker.postMessage({ type: "run", id: hq.busy.id, audio: hq.busy.audio });
 }
 
 function loadScript(src) {
@@ -989,12 +1111,13 @@ async function asrLoad() {
       const t0 = words[0].start, t1 = words[words.length - 1].end;
       // directions are stamped when a frame leaves voice focus, but measured on the newest input, about
       // one focus window (32 ms) ahead of it
-      if (t && !JUNK.has(t)) addLine(tidy(t), speechAngle(t0 - 0.1 - FN / FS, t1 + 0.1), "speech", t0, t1);
+      if (t && !JUNK.has(t)) hqSubmit(addLine(tidy(t), speechAngle(t0 - 0.1 - FN / FS, t1 + 0.1), "speech", t0, t1), t0, t1);
       utt.lastEnd = t1;
     });
     rec.setWords(true);
     asr.rec = rec;
     asr.status = "";
+    hqLoad();
   } catch (e) {
     asr.status = `speech model didn't load: ${e.message || e}`;
   }
@@ -1011,7 +1134,7 @@ function onFocusFrame(out, speech, bang, overFloor) {
   cap.voiceUntil = bang || utt.skip > 0 ? 0 : speech ? performance.now() + 150 : cap.voiceUntil;
   if (bang) utt.skip = 30;  // a clap is loud enough to count as speech; keep it out of the talker's direction
   if (utt.skip > 0) utt.skip--;
-  else if (speech && asr.rec && ++utt.tick % 4 === 0) trackSpeechDir(Math.min(1, Math.max(0.1, (overFloor - 8) / 12)));
+  else if (speech && asr.rec && ++utt.tick % 8 === 0) trackSpeechDir(Math.min(1, Math.max(0.1, (overFloor - 8) / 12)));
   const now = performance.now();
   if (bang && now - cap.lastBang > 600) {
     cap.lastBang = now;
@@ -1021,10 +1144,12 @@ function onFocusFrame(out, speech, bang, overFloor) {
     }, 150);
   }
   if (!asr.rec) return;
-  const g = cap.gain / 32768;
+  const g = cap.gain / 32768, ring = hq.ring, base = asr.fed;
   asr.fed += FH;
   for (let i = 0; i < FH; i++) {
-    asr.buf[asr.n++] = Math.max(-1, Math.min(1, out[i] * g));
+    const x = Math.max(-1, Math.min(1, out[i] * g));
+    ring[(base + i) % ring.length] = x;
+    asr.buf[asr.n++] = x;
     if (asr.n === asr.buf.length) {
       asr.rec.acceptWaveformFloat(asr.buf, FS);
       asr.n = 0;
@@ -1443,7 +1568,8 @@ function drawTranscript(r) {
   const failed = asr.status.startsWith("speech model didn't");
   const mics = focus ? `${focus.n} mic${focus.n === 1 ? "" : "s"}` : "waiting for mics";
   const state = !cap.on ? "captions off" : asr.status ? (failed ? "speech model failed" : "loading speech model…")
-    : `offline · ${S.focus ? (focus && focus.wRe ? "voice focus" : "voice focus learning") : "plain mix"} · ${mics}`;
+    : `offline · ${S.focus ? (focus && focus.wRe ? "voice focus" : "voice focus learning") : "plain mix"} · ${mics}`
+      + (hq.status ? ` · ${hq.status}` : hq.ready ? ` · Moonshine${hq.last ? ` ${hq.last}` : ""}` : "");
   ctx.font = font(11);
   let st = state;
   while (st.length > 4 && ctx.measureText(st).width > r.w - 120) st = st.slice(0, -2);
@@ -1489,7 +1615,17 @@ function drawTranscript(r) {
   ctx.restore();
 }
 
-function render() {
+let lastDraw = 0;
+function render(now) {
+  requestAnimationFrame(render);
+  if (now - lastDraw < 30) return;  // 30 fps is plenty here and leaves the tablet's CPU for audio and USB
+  lastDraw = now;
+  const t0 = performance.now();
+  draw();
+  busy.ms += performance.now() - t0;
+}
+
+function draw() {
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
   const g = 10;
@@ -1508,7 +1644,6 @@ function render() {
     drawLevels(R(g, y + gh + g, gw, rh - gh - g));
     drawTranscript(R(2 * g + gw, y, W - 3 * g - gw, rh));
   }
-  requestAnimationFrame(render);
 }
 
 // ------------------------------------------------------------------ status line
@@ -1518,11 +1653,19 @@ function rate(times, now) {
   return times.length > 1 ? ((times.length - 1) * 1000) / Math.max(1, now - times[0]) : 0;
 }
 
+let busyAt = performance.now();
 setInterval(() => {
-  const now = performance.now(), pk = rate(pktTimes, now), fps = rate(frameTimes, now);
+  const now = performance.now(), pk = rate(pktTimes, now), fps = rate(frameTimes, now), rx = rate(rxTimes, now);
+  const load = (100 * busy.ms) / (now - busyAt);
+  busy.ms = 0;
+  busyAt = now;
   let s = conn ? `${conn.name} · ${connState}` : "not connected";
-  if (conn && connState === "streaming") {
+  if (conn && (connState === "streaming" || conn instanceof DemoConn)) {
     s += ` · ${(pk * 128 / 1000).toFixed(1)} k samples/s · camera ${fps.toFixed(0)} fps`;
+    // shown here vs arrived over USB vs what the board says it sent: tells where frames get lost
+    const bs = /([\d.]+) camera fps, (\d+) frames skipped/.exec(boardStats);
+    if (rx > fps + 1.5 || bs) s += ` (got ${rx.toFixed(0)}${bs ? `, board sent ${(+bs[1]).toFixed(0)}, skipped ${bs[2]}` : ""})`;
+    s += ` · load ${load.toFixed(0)}%`;
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
   }
@@ -1532,7 +1675,11 @@ setInterval(() => {
   $("conn").title = boardStats || boardMsg;
 }, 500);
 
-setInterval(() => model.tick(S.thr, performance.now() < cap.voiceUntil), 33);
+setInterval(() => {
+  const t0 = performance.now();
+  model.tick(S.thr, t0 < cap.voiceUntil);
+  busy.ms += performance.now() - t0;
+}, 33);
 
 // ------------------------------------------------------------------ controls
 
@@ -1631,7 +1778,11 @@ async function connect(c) {
   gaps = 0;
   $("connect").classList.add("hidden");
   focus = null;
-  await c.run((data) => parser.feed(data), (s) => { connState = s; });
+  await c.run((data) => {
+    const t0 = performance.now();
+    parser.feed(data);
+    busy.ms += performance.now() - t0;
+  }, (s) => { connState = s; });
   if (conn === c) {
     conn = null;
     $("connect").classList.remove("hidden");

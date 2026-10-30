@@ -30,7 +30,8 @@ grown to an 8-mic array around the torso for full 360° direction finding.
 **Tablet / phone app (browser, no install)**: [open it](https://moonx02.github.io/wearable-mic-array/app/)
 - Plug the board into an Android tablet's USB-C port and open the page in Chrome: it reads the same USB stream (WebUSB / Web Serial) and runs the 360° SRP-PHAT direction finder in JavaScript.
 - Camera with the direction glow and edge arrows, 360° radar, mic levels, two-clap calibration.
-- **Subtitles from the array, fully offline:** the same voice focus as the laptop app (MVDR beam + Wiener filter, ported to JavaScript and checked against the Python: correlation 0.9999) feeds an on-device recogniser ([Vosk](https://github.com/alphacep/vosk-api) in WebAssembly, small English model). Words appear while the talker speaks; each line is placed by the talker's direction, measured over exactly the time span of its words.
+- **Subtitles from the array, fully offline:** the same voice focus as the laptop app (MVDR beam + Wiener filter, ported to JavaScript and checked against the Python: correlation 0.9999) feeds an on-device recogniser ([Vosk](https://github.com/alphacep/vosk-api) in WebAssembly, small English model). Words appear while the talker speaks; then [Moonshine base](https://github.com/usefulsensors/moonshine) (about as accurate as Whisper base.en) re-reads each finished sentence from the same focused audio in a background worker and replaces it. Each line is placed by the talker's direction, measured over exactly the time span of its words.
+- The status line shows camera frames shown / received / sent by the board and the page's CPU load, to see where frames get lost.
 - After the first visit it needs no internet at all (the page, recogniser and model are kept on the device), and nothing leaves the tablet.
 - Works without a board too: tap **Demo** for recorded speech and claps from around the array over a fan. Source: [`docs/app/`](docs/app/).
 
@@ -109,7 +110,8 @@ python3 mic_caption_view.py                                            # 4-mic v
 
 Tablet: plug the board into an Android tablet, open
 <https://moonx02.github.io/wearable-mic-array/app/> in Chrome, tap **Connect USB** and pick the board.
-The first visit downloads the 41 MB speech model; after that it works offline.
-Bundled: `vosk-browser` 0.0.8 and `vosk-model-small-en-us-0.15` (both Apache-2.0).
+The first visit with captions on downloads the speech models (41 MB Vosk + about 90 MB Moonshine and its runtime); after that it works offline.
+Bundled: `vosk-browser` 0.0.8 and `vosk-model-small-en-us-0.15` (both Apache-2.0); `@huggingface/transformers` 4.3.2 with
+onnxruntime-web (Apache-2.0 / MIT) and `onnx-community/moonshine-base-ONNX` (MIT, 8-bit).
 
 More options, calibration and the 4-mic setup are in [`esp32s3/README.md`](esp32s3/README.md#running-it).

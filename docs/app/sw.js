@@ -1,7 +1,8 @@
-// Keeps the app usable with no internet. The speech model is not cached here: the recognizer keeps its
-// own copy (in IndexedDB) after the first download.
-const CACHE = "mic360-v3";
-const CORE = ["./", "index.html", "app.js", "lib/vosk.js", "manifest.json", "icon-192.png", "icon-512.png",
+// Keeps the app usable with no internet. The speech models are not cached here: Vosk keeps its own copy
+// in IndexedDB and Moonshine in the "transformers-cache" store after the first download.
+const CACHE = "mic360-v5";
+const CORE = ["./", "index.html", "app.js", "asr_worker.js", "lib/vosk.js", "lib/transformers.js",
+              "manifest.json", "icon-192.png", "icon-512.png",
               "demo/tts_a1.wav", "demo/tts_a2.wav", "demo/tts_b1.wav"];
 
 self.addEventListener("install", (e) => {
@@ -10,9 +11,18 @@ self.addEventListener("install", (e) => {
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(caches.keys()
-    .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+    .then((keys) => Promise.all(keys.filter((k) => k.startsWith("mic360-") && k !== CACHE).map((k) => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
+
+// Cross-origin isolation lets Moonshine use several CPU cores; GitHub Pages can't send these headers itself.
+function isolate(r) {
+  if (!r || r.status === 0 || r.type === "opaque") return r;
+  const h = new Headers(r.headers);
+  h.set("Cross-Origin-Opener-Policy", "same-origin");
+  h.set("Cross-Origin-Embedder-Policy", "require-corp");
+  return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
+}
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
@@ -27,5 +37,6 @@ self.addEventListener("fetch", (e) => {
   });
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 4000));
   e.respondWith(Promise.race([fromNet, timeout])
-    .catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || fromNet)));
+    .catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || fromNet))
+    .then(isolate));
 });
