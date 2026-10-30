@@ -37,7 +37,7 @@ grown to an 8-mic array around the torso for full 360° direction finding.
   - **Where's the alarm:** finds beeping or steady alarm tones (smoke, fire, CO; 400 Hz–4.5 kHz), shows their direction, pitch and beep style, and gives a long buzz when one starts. A beep must repeat at one unwavering pitch before it counts, so talk and whistles don't set it off.
   - **Evacuate:** phones at exits play a falling chirp ([`?role=exit`](https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=exit)), phones where it isn't safe play an up-and-down chirp ([`?role=danger`](https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=danger)). The tablet points to the nearest exit that isn't in the same direction as a danger, marks dangers as red keep-away zones, and buzzes twice when you face one.
 
-  The beacon chirps all sweep 2.5–6.5 kHz in 150 ms with different shapes, which match each other at only ~10%, so matched filters tell them apart even when they overlap, and ignore voices, fans and claps. The direction comes from the compressed pulse (or, for alarms, the first part of each beep before echoes build up). In simulation with a fan and talkers: beacons within 0–4°, alarms within 0–6°, two exits with the same code kept apart, and no false or mixed-up hits.
+  The beacon chirps all sweep 2.5–6.5 kHz in 150 ms with different shapes, which match each other at only ~10%, so matched filters tell them apart even when they overlap, and ignore voices, fans and claps. The direction comes from the compressed pulse (or, for alarms, the first part of each beep before echoes build up). In simulation with a fan and talkers: beacons within 0–4°, alarms mostly within 3° (worst 13°, for a low 520 Hz sounder), two exits with the same code kept apart, and no false or mixed-up hits. **Full guide with screenshots: [`docs/FIND_MODE.md`](docs/FIND_MODE.md).**
 - After the first visit it needs no internet at all (the page, recogniser and model are kept on the device), and nothing leaves the tablet.
 - Works without a board too: tap **Demo** for recorded speech and claps from around the array over a fan. Source: [`docs/app/`](docs/app/).
 
@@ -81,6 +81,7 @@ Details, method and before/after spectrograms: [`esp32s3/README.md`](esp32s3/REA
 | [`esp32s3/CAMERA_AND_CAPTIONS.md`](esp32s3/CAMERA_AND_CAPTIONS.md) | Firmware flow, USB packet format, offline proof |
 | [`hud/`](hud/) | HUD prototype and the 8-mic simulation |
 | [`docs/app/`](docs/app/) | Browser app for an Android tablet over USB ([live](https://moonx02.github.io/wearable-mic-array/app/)) |
+| [`docs/FIND_MODE.md`](docs/FIND_MODE.md) | Find mode guide: follow a leader, find an alarm, evacuate (with screenshots) |
 | [`docs/planning/`](docs/planning/) | 8-mic wiring plan, array layout study, accuracy study |
 
 ## Hardware

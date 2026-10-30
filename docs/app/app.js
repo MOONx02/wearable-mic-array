@@ -435,7 +435,8 @@ class Beacon {
       const st = model.steering(act.map((a) => a[0]), CHIRP_HI, CHIRP_LO), outs = srcs.map((_, si) => this.out(code, si));
       for (const p of kept) {
         const curve = this.pulseSRP(outs, p, st);
-        const level = 10 * Math.log10(energy[p] / n / BLEN / (32768 * 32768) + 1e-12);
+        // the chirp's own energy (score² × window energy), so a sound overlapping it doesn't make it seem closer
+        const level = 10 * Math.log10(((sc[p] / n) ** 2 * energy[p]) / n / BLEN / (32768 * 32768) + 1e-12);
         found.push({ t: model.now, at: (start + p) / FS, ...pick(curve, st), strength: 0, curve, n, kind: code, score: sc[p] / n, level });
       }
     });
@@ -751,7 +752,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v12";
+const APP_VERSION = "v13";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -2092,7 +2093,7 @@ function drawFinder(r) {
   const noBack = (d) => d.fb === null;
 
   if (S.findMode === "follow") {
-    const s = tracks(beacon.dets, "leader", 6)[0];
+    const s = tracks(beacon.dets, "leader", 6).sort((a, b) => a.age - b.age)[0];  // where they are now, not where they were
     if (!s) return idle(["Listening for the leader's tone…", "", "The leader opens this on their phone and taps Start:", beaconUrl("leader"), "(Demo has one built in.)"], [beaconUrl("leader")]);
     const a = orient(s.angle), fresh = s.age < 2, col = fresh ? FOX : DIM, trend = trendText(s.trend);
     dial([[a, col, 6]]);
@@ -2116,8 +2117,8 @@ function drawFinder(r) {
     return;
   }
 
-  const exits = tracks(beacon.dets, "exit", 4).filter((e) => e.age < 3);
-  const dangers = tracks(beacon.dets, "danger", 4).filter((d) => d.age < 3);
+  const exits = tracks(beacon.dets, "exit", 4).filter((e) => e.age < 2);
+  const dangers = tracks(beacon.dets, "danger", 4).filter((d) => d.age < 2);
   if (!exits.length && !dangers.length) {
     return idle(["Listening for exit and danger tones…", "", "A phone at each exit opens", beaconUrl("exit"), "and one where it isn't safe opens", beaconUrl("danger"), "(Demo has both built in.)"],
       [beaconUrl("exit"), beaconUrl("danger")]);

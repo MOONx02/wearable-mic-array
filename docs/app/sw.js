@@ -1,6 +1,6 @@
 // Keeps the app usable with no internet. The speech models are not cached here: Vosk keeps its own copy
 // in IndexedDB and Moonshine in the "transformers-cache" store after the first download.
-const CACHE = "mic360-v12";
+const CACHE = "mic360-v13";
 const CORE = ["./", "index.html", "beacon.html", "app.js", "asr_worker.js", "lib/vosk.js", "lib/transformers.js",
               "manifest.json", "icon-192.png", "icon-512.png",
               "demo/tts_a1.wav", "demo/tts_a2.wav", "demo/tts_b1.wav"];
