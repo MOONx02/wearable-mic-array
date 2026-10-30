@@ -33,7 +33,7 @@
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
   #connect { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 14px; background: rgba(13, 17, 23, 0.92); text-align: center; padding: 20px; }
-  #connect.hidden { display: none; }
+  #connect.hidden, select.hidden { display: none; }
   #connect h1 { font-size: 22px; margin: 0; }
   #connect p { color: #8b949e; max-width: 520px; margin: 0; line-height: 1.45; }
   #connect .big { font-size: 18px; padding: 14px 28px; }
@@ -44,7 +44,12 @@
 <div id="bar">
   <button id="cc" class="on" title="Live subtitles from the mic array, recognised offline on this device">CC</button>
   <button id="focus" class="on" title="Voice focus: beamform the array toward the talker and filter out the background">Voice focus</button>
-  <button id="find" title="Find mode: point to the beacon chirp played by another phone (beacon.html); turns captions off">Find</button>
+  <button id="find" title="Find mode: point to beacon tones from other phones (beacon.html) or to an alarm; turns captions off">Find</button>
+  <select id="findmode" class="hidden" title="What Find listens for">
+    <option value="follow">Follow a leader</option>
+    <option value="alarm">Where's the alarm</option>
+    <option value="evac">Evacuate</option>
+  </select>
   <button id="centre" title="Clap straight in front of the camera, then press this">Set centre</button>
   <button id="edge" title="Clap at the right edge of the picture, then press this">Right edge</button>
   <button id="swaplr">Swap L/R</button>

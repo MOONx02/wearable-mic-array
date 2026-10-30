@@ -9,41 +9,65 @@
 <style>
   html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3;
     font: 16px -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
-  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;
     padding: 24px; box-sizing: border-box; text-align: center; }
   h1 { margin: 0; font-size: 26px; }
   p { margin: 0; color: #8b949e; max-width: 460px; line-height: 1.45; }
-  #go { font: inherit; font-size: 24px; padding: 26px 56px; border-radius: 18px; border: 2px solid #3fb950;
+  #roles { display: flex; gap: 8px; }
+  #roles button { font: inherit; padding: 10px 18px; border-radius: 10px; border: 1px solid #30363d;
     background: #21262d; color: #e6edf3; }
-  #go.on { background: #238636; }
+  #roles button.on { border-color: var(--c); background: color-mix(in srgb, var(--c) 30%, #21262d); }
+  #go { font: inherit; font-size: 24px; padding: 26px 56px; border-radius: 18px; border: 2px solid var(--c);
+    background: #21262d; color: #e6edf3; }
+  #go.on { background: color-mix(in srgb, var(--c) 70%, #21262d); }
   #pulse { width: 22px; height: 22px; border-radius: 50%; background: #30363d; }
-  #pulse.lit { background: #3fb950; }
+  #pulse.lit { background: var(--c); }
   label { color: #8b949e; }
   input[type=range] { width: 220px; vertical-align: middle; }
 </style>
 </head>
 <body>
-<h1>Beacon</h1>
-<p>This phone plays a short rising chirp twice a second. The mic-array tablet in <b>Find</b> mode points to it.
-Put this phone on (or in) the thing you want to find, or hand it to the person you're looking for.</p>
+<h1 id="title">Beacon</h1>
+<div id="roles"></div>
+<p id="about"></p>
 <button id="go">Start</button>
 <div id="pulse"></div>
 <label>Volume <input id="vol" type="range" min="0.1" max="1" step="0.05" value="1"></label>
 <p>Turn the phone's media volume up. Keep this page open; the screen stays on while it plays.</p>
 <script>
 "use strict";
-// Same chirp as BEACON in app.js: 2.5 → 6.5 kHz over 150 ms, 10 ms fades, every 0.5 s.
-const BEACON = { f0: 2500, f1: 6500, dur: 0.15, period: 0.5 };
-let ac = null, src = null, gain = null, lock = null, blink = null;
+// Same codes as CODES in app.js: 150 ms sweeps through 2.5–6.5 kHz, frequency piecewise linear through
+// `shape` (time as a fraction of the chirp), 10 ms fades, repeated every `period` seconds.
+const LO = 2500, HI = 6500, CHIRP_S = 0.15;
+const ROLES = {
+  leader: { name: "Leader", shape: [[0, LO], [1, HI]], period: 0.5, color: "#3fb950",
+    about: "Follow me: tablets in Find → Follow a leader point to this phone. Carry it, or put it on the thing to find." },
+  exit: { name: "Exit", shape: [[0, HI], [1, LO]], period: 0.5, color: "#3fb950",
+    about: "Put this phone at an exit or on a safe route. Tablets in Find → Evacuate steer people toward it." },
+  danger: { name: "Danger", shape: [[0, LO], [0.5, HI], [1, LO]], period: 0.3, color: "#f85149",
+    about: "Put this phone where it isn't safe (a hot room, a blocked hall). Tablets in Find → Evacuate warn people away from it." },
+};
+let role = new URLSearchParams(location.search).get("role");
+if (!ROLES[role]) role = "leader";
+let ac = null, src = null, gain = null, lock = null, blink = null, t0 = 0;
+const $ = (id) => document.getElementById(id);
+
+function chirp(sr) {
+  const { shape } = ROLES[role], len = Math.round(CHIRP_S * sr), fade = 0.01 * sr, out = new Float32Array(len);
+  let ph = 0, k = 0;
+  for (let i = 0; i < len; i++) {
+    const u = i / len;
+    while (k < shape.length - 2 && u > shape[k + 1][0]) k++;
+    const [u0, f0] = shape[k], [u1, f1] = shape[k + 1];
+    out[i] = 0.9 * Math.sin(ph) * (0.5 - 0.5 * Math.cos(Math.PI * Math.min(1, i / fade, (len - 1 - i) / fade)));
+    ph += (2 * Math.PI * (f0 + ((f1 - f0) * (u - u0)) / (u1 - u0))) / sr;
+  }
+  return out;
+}
 
 function buffer(ctx) {
-  const sr = ctx.sampleRate, n = Math.round(BEACON.period * sr), len = Math.round(BEACON.dur * sr);
-  const b = ctx.createBuffer(1, n, sr), d = b.getChannelData(0);
-  const rate = (BEACON.f1 - BEACON.f0) / BEACON.dur, fade = 0.01 * sr;
-  for (let i = 0; i < len; i++) {
-    const t = i / sr, e = Math.min(1, i / fade, (len - 1 - i) / fade);
-    d[i] = 0.9 * Math.sin(2 * Math.PI * (BEACON.f0 * t + 0.5 * rate * t * t)) * (0.5 - 0.5 * Math.cos(Math.PI * e));
-  }
+  const sr = ctx.sampleRate, b = ctx.createBuffer(1, Math.round(ROLES[role].period * sr), sr);
+  b.getChannelData(0).set(chirp(sr));
   return b;
 }
 
@@ -51,17 +75,17 @@ async function start() {
   ac = ac || new AudioContext();
   await ac.resume();
   gain = ac.createGain();
-  gain.gain.value = +document.getElementById("vol").value;
+  gain.gain.value = +$("vol").value;
   gain.connect(ac.destination);
   src = ac.createBufferSource();
   src.buffer = buffer(ac);
   src.loop = true;
   src.connect(gain);
-  const t0 = ac.currentTime + 0.05;
+  t0 = ac.currentTime + 0.05;
   src.start(t0);
   blink = setInterval(() => {
-    const ph = ((ac.currentTime - t0) % BEACON.period + BEACON.period) % BEACON.period;
-    document.getElementById("pulse").classList.toggle("lit", ph < BEACON.dur);
+    const p = ROLES[role].period, ph = (((ac.currentTime - t0) % p) + p) % p;
+    $("pulse").classList.toggle("lit", ph < CHIRP_S);
   }, 30);
   await keepAwake();
 }
@@ -77,22 +101,47 @@ function stop() {
   try { src?.stop(); } catch (e) { /* not started */ }
   src = null;
   clearInterval(blink);
-  document.getElementById("pulse").classList.remove("lit");
+  $("pulse").classList.remove("lit");
   lock?.release();
   lock = null;
 }
 
-const go = document.getElementById("go");
+function show() {
+  const r = ROLES[role];
+  document.body.style.setProperty("--c", r.color);
+  $("title").textContent = `Beacon · ${r.name}`;
+  $("about").textContent = r.about;
+  for (const b of $("roles").children) b.classList.toggle("on", b.dataset.role === role);
+  history.replaceState(null, "", `?role=${role}`);
+}
+
+for (const [k, r] of Object.entries(ROLES)) {
+  const b = document.createElement("button");
+  b.textContent = r.name;
+  b.dataset.role = k;
+  b.style.setProperty("--c", r.color);
+  b.onclick = async () => {
+    const playing = !!src;
+    if (playing) stop();
+    role = k;
+    show();
+    if (playing) await start();
+  };
+  $("roles").appendChild(b);
+}
+
+const go = $("go");
 go.onclick = async () => {
   const on = !go.classList.contains("on");
   if (on) await start(); else stop();
   go.classList.toggle("on", on);
   go.textContent = on ? "Stop" : "Start";
 };
-document.getElementById("vol").oninput = (e) => { if (gain) gain.gain.value = +e.target.value; };
+$("vol").oninput = (e) => { if (gain) gain.gain.value = +e.target.value; };
 document.addEventListener("visibilitychange", async () => {
   if (document.visibilityState === "visible" && src && !lock) await keepAwake();
 });
+show();
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 </body>

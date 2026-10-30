@@ -22,8 +22,10 @@ const PRESETS = {
 };
 
 const S = Object.assign({ layout: "rear5", hfov: 60, offset: 0, swap: false, swapfb: false, rotate: 0,
-                          mirror: false, thr: 12, cc: true, focus: true, find: false }, JSON.parse(localStorage.getItem("mic360") || "{}"));
+                          mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow" },
+                        JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
+if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
 if (!PRESETS[S.layout]) S.layout = "rear5";
 const save = () => localStorage.setItem("mic360", JSON.stringify(S));
 const wrap = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
@@ -225,11 +227,12 @@ class Model {
     return out;
   }
 
-  srp(srcs, st) {
+  // over the latest SEG samples, or the SEG from stream sample `start`
+  srp(srcs, st, start = null) {
     const re = [], im = [];
     for (const s of srcs) {
       const r = new Float64Array(NFFT), i = new Float64Array(NFFT);
-      const seg = this.tail(s, SEG, this.seg);
+      const seg = start === null ? this.tail(s, SEG, this.seg) : this.at(s, start, SEG, this.seg);
       for (let n = 0; n < SEG; n++) r[n] = seg[n];
       fft(r, i);
       re.push(r);
@@ -299,19 +302,39 @@ function pick(curve, st) {
   return { angle, sigma, fb };
 }
 
-// ------------------------------------------------------------------ beacon finder ("fox and hound")
+// ------------------------------------------------------------------ Find mode: beacons and alarms
 
-// The beacon is a rising chirp, 2.5 → 6.5 kHz over 150 ms, every half second (beacon.html plays it; keep
-// the two in step). Voices, fans and claps don't look like it, so a matched filter finds it well under
-// the noise, and SRP-PHAT over just its band gives the direction.
-const BEACON = { f0: 2500, f1: 6500, dur: 0.15, period: 0.5 };
-const BLEN = Math.round(BEACON.dur * FS), BN = 8192, BEACON_SCORE = 0.3, FOX = "#3fb950";
+// Beacon codes: each is a 150 ms sweep through 2.5–6.5 kHz with its own shape (beacon.html plays them; keep
+// the two in step). Rising, falling and up-then-down sweeps match each other at only ~10%, so matched
+// filters tell them apart even when they overlap, and voices, fans and claps don't look like any of them.
+// SRP-PHAT over just their band gives the direction.
+const CHIRP_LO = 2500, CHIRP_HI = 6500, CHIRP_S = 0.15;
+const BLEN = Math.round(CHIRP_S * FS), BN = 8192, BEACON_SCORE = 0.3;
+const FOX = "#3fb950", DANGER = "#f85149", ALARM_COL = "#e3b341";
+const CODES = {
+  leader: { name: "Leader", shape: [[0, CHIRP_LO], [1, CHIRP_HI]], period: 0.5, color: FOX },
+  exit: { name: "Exit", shape: [[0, CHIRP_HI], [1, CHIRP_LO]], period: 0.5, color: FOX },
+  danger: { name: "Danger", shape: [[0, CHIRP_LO], [0.5, CHIRP_HI], [1, CHIRP_LO]], period: 0.3, color: DANGER },
+};
+const KINDS = { ...CODES, alarm: { name: "Alarm", color: ALARM_COL } };
+const FIND_MODES = {
+  follow: { name: "Follow a leader", codes: ["leader"] },
+  alarm: { name: "Where's the alarm", codes: [] },
+  evac: { name: "Evacuate", codes: ["exit", "danger"] },
+};
+const kindColor = (d) => (d.kind ? KINDS[d.kind].color : d.strength > 30 ? LOUD : GLOW);
 
-function beaconChirp() {
-  const out = new Float64Array(BLEN), rate = (BEACON.f1 - BEACON.f0) / BEACON.dur, fade = 0.01 * FS;
-  for (let i = 0; i < BLEN; i++) {
-    const t = i / FS, e = Math.min(1, i / fade, (BLEN - 1 - i) / fade);
-    out[i] = Math.sin(2 * Math.PI * (BEACON.f0 * t + 0.5 * rate * t * t)) * (0.5 - 0.5 * Math.cos(Math.PI * e));
+// A code's sweep at sample rate sr: frequency piecewise linear through its shape (time as a fraction of
+// the chirp), 10 ms raised-cosine fades.
+function codeChirp(code, sr = FS) {
+  const shape = CODES[code].shape, len = Math.round(CHIRP_S * sr), fade = 0.01 * sr, out = new Float64Array(len);
+  let ph = 0, k = 0;
+  for (let i = 0; i < len; i++) {
+    const u = i / len;
+    while (k < shape.length - 2 && u > shape[k + 1][0]) k++;
+    const [u0, f0] = shape[k], [u1, f1] = shape[k + 1];
+    out[i] = Math.sin(ph) * (0.5 - 0.5 * Math.cos(Math.PI * Math.min(1, i / fade, (len - 1 - i) / fade)));
+    ph += (2 * Math.PI * (f0 + ((f1 - f0) * (u - u0)) / (u1 - u0))) / sr;
   }
   return out;
 }
@@ -319,83 +342,110 @@ function beaconChirp() {
 class Beacon {
   constructor() {
     this.fft = makeFFT(BN);
-    this.k0 = Math.floor(((BEACON.f0 - 300) * BN) / FS);
-    this.k1 = Math.ceil(((BEACON.f1 + 300) * BN) / FS);
-    const re = new Float64Array(BN), im = new Float64Array(BN);
-    re.set(beaconChirp());
-    this.fft(re, im);
-    // analytic template (positive frequencies only, doubled), so the filter output's size is its envelope
-    const nb = this.k1 - this.k0 + 1;
-    this.tRe = new Float64Array(nb);
-    this.tIm = new Float64Array(nb);
-    let e = 0;
-    for (let b = 0; b < nb; b++) {
-      this.tRe[b] = 2 * re[this.k0 + b];
-      this.tIm[b] = 2 * im[this.k0 + b];
-      e += this.tRe[b] ** 2 + this.tIm[b] ** 2;
+    this.k0 = Math.floor(((CHIRP_LO - 300) * BN) / FS);
+    this.k1 = Math.ceil(((CHIRP_HI + 300) * BN) / FS);
+    this.tmpl = {};
+    for (const code of Object.keys(CODES)) {
+      const re = new Float64Array(BN), im = new Float64Array(BN);
+      re.set(codeChirp(code));
+      this.fft(re, im);
+      // analytic template (positive frequencies only, doubled), so the filter output's size is its envelope
+      const nb = this.k1 - this.k0 + 1, tRe = new Float64Array(nb), tIm = new Float64Array(nb);
+      let e = 0;
+      for (let b = 0; b < nb; b++) {
+        tRe[b] = 2 * re[this.k0 + b];
+        tIm[b] = 2 * im[this.k0 + b];
+        e += tRe[b] ** 2 + tIm[b] ** 2;
+      }
+      this.tmpl[code] = { tRe, tIm, norm: Math.sqrt(e / BN) };
     }
-    this.tNorm = Math.sqrt(e / BN);
     this.done = 0;  // stream sample up to which chirp starts have been checked
     this.dets = [];
     this.buf = new Float32Array(BN);
+    this.outs = new Map();  // filter outputs per code and mic, reused between calls
   }
 
   reset() { this.done = model.total; this.dets = []; }
 
-  // Matched filter over the chirp starts since the last call; on a hit, the direction from the chirp itself.
-  process() {
-    const act = model.active();
-    if (act.length < 2 || model.total < FS) return;
+  out(code, i) {
+    const key = code + i;
+    if (!this.outs.has(key)) this.outs.set(key, [new Float64Array(BN), new Float64Array(BN)]);
+    return this.outs.get(key);
+  }
+
+  // Matched filters for the given codes over the chirp starts since the last call; each hit gets its
+  // direction from the chirp itself. Returns the new hits.
+  process(codes) {
+    const act = model.active(), found = [];
+    if (!codes.length || act.length < 2 || model.total < FS) return found;
     let adv = model.total - this.done;
-    if (adv < 2048) return;
+    if (adv < 2048) return found;
     if (adv > BN - BLEN) adv = BN - BLEN;
-    const W = adv + BLEN, start = model.total - W, srcs = act.map((a) => a[1]);
-    const score = new Float64Array(adv), energy = new Float64Array(adv), outs = [];
+    const W = adv + BLEN, start = model.total - W, srcs = act.map((a) => a[1]), n = srcs.length;
+    const energy = new Float64Array(adv), scores = codes.map(() => new Float64Array(adv)), den = new Float64Array(adv);
     const re = new Float64Array(BN), im = new Float64Array(BN), yr = new Float64Array(BN), yi = new Float64Array(BN);
-    for (const s of srcs) {
+    const cum = new Float64Array(W + 1);
+    srcs.forEach((s, si) => {
       model.at(s, start, W, this.buf);
       re.fill(0);
       im.fill(0);
       for (let i = 0; i < W; i++) re[i] = this.buf[i];
       this.fft(re, im);
-      // two inverse FFTs (forward FFT of the conjugate): the filter output, and the band-limited signal
-      // whose energy normalises it
+      // inverse FFTs (forward FFT of the conjugate): the band-limited signal whose energy normalises the
+      // filters, then each code's filter output
       yr.fill(0);
       yi.fill(0);
-      const cr = new Float64Array(BN), ci = new Float64Array(BN);
-      for (let k = this.k0, b = 0; k <= this.k1; k++, b++) {
-        const xr = 2 * re[k], xi = 2 * im[k];
-        cr[k] = xr * this.tRe[b] + xi * this.tIm[b];
-        ci[k] = -(xi * this.tRe[b] - xr * this.tIm[b]);
-        yr[k] = xr;
-        yi[k] = -xi;
-      }
-      this.fft(cr, ci);
+      for (let k = this.k0; k <= this.k1; k++) { yr[k] = 2 * re[k]; yi[k] = -2 * im[k]; }
       this.fft(yr, yi);
-      outs.push([cr, ci]);
-      const cum = new Float64Array(W + 1);
       for (let i = 0; i < W; i++) cum[i + 1] = cum[i] + (yr[i] * yr[i] + yi[i] * yi[i]) / (BN * BN);
       for (let p = 0; p < adv; p++) {
         const e = cum[p + BLEN] - cum[p];
         energy[p] += e;
-        score[p] += Math.hypot(cr[p], ci[p]) / BN / (Math.sqrt(e) * this.tNorm + 1e-9);
+        den[p] = Math.sqrt(e);
       }
-    }
+      codes.forEach((code, ci) => {
+        const { tRe, tIm, norm } = this.tmpl[code], [cr, cim] = this.out(code, si), sc = scores[ci];
+        cr.fill(0);
+        cim.fill(0);
+        for (let k = this.k0, b = 0; k <= this.k1; k++, b++) {
+          const xr = 2 * re[k], xi = 2 * im[k];
+          cr[k] = xr * tRe[b] + xi * tIm[b];
+          cim[k] = -(xi * tRe[b] - xr * tIm[b]);
+        }
+        this.fft(cr, cim);
+        for (let p = 0; p < adv; p++) sc[p] += Math.hypot(cr[p], cim[p]) / BN / (den[p] * norm + 1e-9);
+      });
+    });
     this.done = model.total;
-    let p = 0;
-    for (let i = 1; i < adv; i++) if (score[i] > score[p]) p = i;
-    const sc = score[p] / srcs.length;
-    const t = (start + p) / FS;
-    const prev = this.dets[this.dets.length - 1];
-    if (sc < BEACON_SCORE || (prev && t - prev.at < 0.25)) return;
-    const st = model.steering(act.map((a) => a[0]), BEACON.f1, BEACON.f0);
-    const curve = this.pulseSRP(outs, p, st);
-    const level = 10 * Math.log10(energy[p] / srcs.length / BLEN / (32768 * 32768) + 1e-12);
-    const det = { t: model.now, at: t, ...pick(curve, st), strength: 0, curve, n: act.length, beacon: true, score: sc, level };
-    this.dets.push(det);
-    while (this.dets.length > 40) this.dets.shift();
-    model.add(det);
-    return det;
+    codes.forEach((code, ci) => {
+      const sc = scores[ci], peaks = [];
+      for (let p = 0; p < adv; p++) {
+        if (sc[p] / n >= BEACON_SCORE && !(p && sc[p] < sc[p - 1]) && !(p + 1 < adv && sc[p] < sc[p + 1])) peaks.push(p);
+      }
+      peaks.sort((a, b) => sc[b] - sc[a]);
+      const kept = [];
+      for (const p of peaks) {
+        // the strongest copy within 50 ms wins (the rest are echoes); two phones with one code still show
+        if (kept.length >= 3 || kept.some((q) => Math.abs(q - p) < 0.05 * FS)) continue;
+        const at = (start + p) / FS;
+        if (this.dets.some((d) => d.kind === code && Math.abs(d.at - at) < 0.05)) continue;
+        kept.push(p);
+      }
+      if (!kept.length) return;
+      const st = model.steering(act.map((a) => a[0]), CHIRP_HI, CHIRP_LO), outs = srcs.map((_, si) => this.out(code, si));
+      for (const p of kept) {
+        const curve = this.pulseSRP(outs, p, st);
+        const level = 10 * Math.log10(energy[p] / n / BLEN / (32768 * 32768) + 1e-12);
+        found.push({ t: model.now, at: (start + p) / FS, ...pick(curve, st), strength: 0, curve, n, kind: code, score: sc[p] / n, level });
+      }
+    });
+    found.sort((a, b) => a.at - b.at);
+    for (const d of found) {
+      this.dets.push(d);
+      model.add(d);
+    }
+    while (this.dets.length && model.now - this.dets[0].t > 12) this.dets.shift();
+    return found;
   }
 
   // Direction from the matched-filter outputs: there the chirp is a pulse about 4 samples wide, so a short
@@ -437,17 +487,142 @@ class Beacon {
     return curve;
   }
 
-  // where it is now: circular mean of the last few hits, and whether it's getting louder (closer)
-  summary() {
-    const recent = this.dets.filter((d) => model.now - d.t < 3);
-    if (!recent.length) return null;
+}
+
+// Hits of one kind from the last `win` seconds grouped by direction (two exits show as two): per group
+// the circular mean of its last few hits, how loud it is, and whether it's getting louder (closer) than
+// it was `older` seconds ago (from the last `avg` hits). Loudest first.
+function tracks(dets, kind, win, older = [2, 5], avg = 4) {
+  const now = model.now, groups = [];
+  for (let i = dets.length - 1; i >= 0; i--) {
+    const d = dets[i];
+    if (d.kind !== kind || now - d.t > win) continue;
+    let g = groups.find((o) => Math.abs(wrap(o.angle - d.angle)) < 25);
+    if (!g) groups.push((g = { angle: d.angle, hits: [] }));
+    g.hits.push(d);
+  }
+  const mean = (a) => a.reduce((s, d) => s + d.level, 0) / a.length;
+  return groups.map((g) => {
+    const lastFew = g.hits.slice(0, avg);
     let x = 0, y = 0;
-    for (const d of recent.slice(-3)) { x += Math.cos((d.angle * Math.PI) / 180); y += Math.sin((d.angle * Math.PI) / 180); }
-    const angle = (Math.atan2(y, x) * 180) / Math.PI, last = recent[recent.length - 1];
-    const older = this.dets.filter((d) => model.now - d.t >= 2 && model.now - d.t < 5);
-    const mean = (a) => a.reduce((s, d) => s + d.level, 0) / a.length;
-    const trend = older.length >= 2 && recent.length >= 2 ? mean(recent.slice(-3)) - mean(older) : 0;
-    return { angle, last, trend, age: model.now - last.t };
+    for (const d of lastFew) { x += Math.cos((d.angle * Math.PI) / 180); y += Math.sin((d.angle * Math.PI) / 180); }
+    const angle = (Math.atan2(y, x) * 180) / Math.PI, level = mean(lastFew.slice(0, 3));
+    const before = dets.filter((d) => d.kind === kind && now - d.t >= older[0] && now - d.t < older[1] && Math.abs(wrap(d.angle - angle)) < 25);
+    const trend = before.length >= 2 && g.hits.length >= 2 ? level - mean(before) : 0;
+    return { angle, level, trend, last: g.hits[0], hits: g.hits.length, age: now - g.hits[0].t };
+  }).sort((a, b) => b.level - a.level);
+}
+
+// Alarm finder. Smoke and fire alarms are loud steady tones (almost all between 400 Hz and 4.5 kHz) that
+// beep on and off. A frame is "tone" when one frequency stands far above the rest of the band, and a run of
+// those at one unwavering pitch is a beep; a voice's pitch slides. Short beeps (CO alarms, 0.1 s) are high
+// piezo tones, and low sounders (520 Hz) beep for half a second, so a beep under 1 kHz must last 0.25 s:
+// that's longer than a voice holds one pitch. When a beep ends, its direction comes from its first ~150 ms,
+// before the room's echoes build up, with GCC-PHAT on just the bins around the tone. A beep only counts with
+// two more at the same pitch in the last 10 s (or once a tone has held for 1.5 s, located every half
+// second), so talk, a whistle or a sung note doesn't.
+const ALARM = { lo: 400, hi: 4500, tonal: 18, share: 0.2, hop: 256, gap: 2, confirm: 10, beeps: 3, steady: 1.5 };
+const samePitch = (a, b) => Math.abs(a - b) <= Math.max(6, 0.012 * b);
+const minBeep = (f) => (f < 1000 ? 0.25 : 0.08) * FS;
+
+class Alarm {
+  constructor() {
+    this.k0 = Math.ceil((ALARM.lo * NFFT) / FS);
+    this.k1 = Math.floor((ALARM.hi * NFFT) / FS);
+    this.win = Float64Array.from({ length: SEG }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * (i + 0.5)) / SEG));
+    this.buf = new Float32Array(SEG);
+    this.dets = [];
+    this.beeps = [];
+    this.run = null;
+    this.done = 0;
+  }
+
+  reset() { this.done = model.total; this.dets = []; this.beeps = []; this.run = null; }
+
+  process() {
+    const act = model.active(), found = [];
+    if (act.length < 2 || model.total < FS) return found;
+    const srcs = act.map((a) => a[1]), nb = this.k1 - this.k0 + 1;
+    if (model.total - this.done > FS) { this.done = model.total - FS; this.run = null; }
+    const re = new Float64Array(NFFT), im = new Float64Array(NFFT), P = new Float64Array(nb);
+    while (this.done + SEG <= model.total) {
+      const start = this.done;
+      this.done += ALARM.hop;
+      P.fill(0);
+      for (const s of srcs) {
+        model.at(s, start, SEG, this.buf);
+        re.fill(0);
+        im.fill(0);
+        for (let i = 0; i < SEG; i++) re[i] = this.buf[i] * this.win[i];
+        fft(re, im);
+        for (let b = 0; b < nb; b++) P[b] += re[this.k0 + b] ** 2 + im[this.k0 + b] ** 2;
+      }
+      let kp = 0, total = 0, tone = 0;
+      for (let b = 0; b < nb; b++) { total += P[b]; if (P[b] > P[kp]) kp = b; }
+      for (let b = Math.max(0, kp - 3); b <= Math.min(nb - 1, kp + 3); b++) tone += P[b];
+      const med = Float64Array.from(P).sort()[nb >> 1];
+      let dk = 0;  // the peak between bins: a parabola through the log powers
+      if (kp > 0 && kp < nb - 1) {
+        const a = Math.log(P[kp - 1] + 1e-30), b = Math.log(P[kp] + 1e-30), c = Math.log(P[kp + 1] + 1e-30);
+        dk = a - 2 * b + c < 0 ? (0.5 * (a - c)) / (a - 2 * b + c) : 0;
+      }
+      const f = ((this.k0 + kp + dk) * FS) / NFFT;
+      // the tone's mean square per mic (Hann window, positive frequencies only), in dBFS
+      const level = 10 * Math.log10((2 * tone) / srcs.length / (NFFT * SEG * 0.375) / (32768 * 32768) + 1e-12);
+      const on = P[kp] >= med * 10 ** (ALARM.tonal / 10) && tone >= ALARM.share * total;
+      const r = this.run;
+      if (on && r && samePitch(f, r.f)) {
+        r.miss = 0;
+        r.last = start;
+        r.f = 0.8 * r.f + 0.2 * f;
+        r.lo = Math.min(r.lo, f);
+        r.hi = Math.max(r.hi, f);
+        r.level = Math.max(r.level, level);
+        if (start - r.start >= ALARM.steady * FS && samePitch(r.hi, r.lo) && start - r.located >= FS / 2) {  // a horn that doesn't beep
+          r.located = start;
+          found.push(this.locate(act, start - 3 * 512 + 384, start, r.f, r.level));
+        }
+        continue;
+      }
+      if (r && ++r.miss <= ALARM.gap) continue;  // a word or a clap over the beep doesn't split it
+      if (r && r.last - r.start + SEG / 2 >= minBeep(r.f) && samePitch(r.hi, r.lo)) {
+        this.beeps.push({ f: r.f, dur: (r.last - r.start + SEG / 2) / FS, end: start });
+        const recent = this.beeps.filter((b) => samePitch(b.f, r.f) && start - b.end < ALARM.confirm * FS).length;
+        if (recent >= ALARM.beeps && r.located < 0 && model.total - r.start < model.N - SEG) {
+          found.push(this.locate(act, r.start + 384, r.last, r.f, r.level));
+        }
+      }
+      this.run = on ? { f, lo: f, hi: f, start, last: start, miss: 0, level, located: -Infinity } : null;
+    }
+    while (this.beeps.length && model.total - this.beeps[0].end > 20 * FS) this.beeps.shift();
+    for (const d of found) {
+      this.dets.push(d);
+      model.add(d);
+    }
+    while (this.dets.length && model.now - this.dets[0].t > 20) this.dets.shift();
+    return found;
+  }
+
+  // up to three frames 32 ms apart from `from`, none starting after `upto` (the last tone frame's start)
+  locate(act, from, upto, f, level) {
+    const fr = Math.round(f / 25) * 25;  // a handful of steering tables, not one per pitch
+    const st = model.steering(act.map((a) => a[0]), fr + 30, fr - 30), srcs = act.map((a) => a[1]);
+    const curve = new Float64Array(360);
+    for (let k = 0, at = from; k < 3 && (k === 0 || at <= upto); k++, at += 512) {
+      const c = model.srp(srcs, st, Math.min(at, upto));
+      for (let i = 0; i < 360; i++) curve[i] += c[i];
+    }
+    const start = from;
+    return { t: model.now, at: start / FS, ...pick(curve, st), strength: 0, curve, n: act.length, kind: "alarm", freq: f, level, score: 1 };
+  }
+
+  // how the alarm at about pitch f sounds: steady, or the length of its beeps
+  pattern(f) {
+    if (this.run && samePitch(this.run.f, f) && this.run.last - this.run.start >= ALARM.steady * FS) return "steady tone";
+    const d = this.beeps.filter((b) => samePitch(b.f, f)).map((b) => b.dur);
+    if (!d.length) return "beeping";
+    const m = Math.max(...d);  // talk over a beep can split it, never lengthen it
+    return m < 0.25 ? "short beeps (CO-alarm style)" : m < 0.8 ? "long beeps (fire-alarm style)" : `beeps ${m.toFixed(1)} s long`;
   }
 }
 
@@ -576,7 +751,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v11";
+const APP_VERSION = "v12";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -722,7 +897,7 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
     const t0 = performance.now();
     const cam = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(320, 240) : null;
     let camSeq = 0, camBusy = false, nextCam = 0;
-    let fox = null, foxPos = 0, nextFox = 0;  // Find mode: a beacon circling the array, nearer and farther
+    const finds = [], nextAt = {}, count = {};  // Find mode's beacons and alarm, playing
     return new Promise((resolve) => {
       this.timer = setInterval(() => {
         if (this.closed) { clearInterval(this.timer); return resolve(); }
@@ -753,23 +928,26 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
           for (let f = 0; f < frames; f++) {
             if (!ev && --wait <= 0) { ev = this.next(); pos = 0; }
             const n = made + f, fi = n & 65535;
-            if (S.find && !fox && n >= nextFox) {
-              const t = n / FS;
-              fox = spatial(beaconChirp(), wrap(t * 9 - 60), false, 700 + 600 * Math.sin(t * 0.25), "peak");
-              foxPos = 0;
-              nextFox = n + BEACON.period * FS;
+            if (S.find) {
+              for (const e of DEMO_FIND[S.findMode]) {
+                nextAt[e.id] ??= n + (e.phase || 0) * FS;
+                if (n < nextAt[e.id]) continue;
+                const t = n / FS, k = (count[e.id] = (count[e.id] || 0) + 1);
+                finds.push({ sig: spatial(e.sig(), e.ang(t), false, e.level(t), "peak"), pos: 0 });
+                nextAt[e.id] = n + (e.gaps ? e.gaps[k % e.gaps.length] : e.period) * FS;
+              }
             }
             for (let c = 0; c < CH; c++) {
               let v = -30935;
               if (c in model.geom) {
                 v = gauss() * 25 + (fan[c] ? fan[c][fi] : 0);
                 if (ev && ev.sig[c]) v += ev.sig[c][pos];
-                if (fox && fox[c]) v += fox[c][foxPos];
+                for (const b of finds) if (b.sig[c]) v += b.sig[c][b.pos];
               }
               dv.setInt16(10 + (f * CH + c) * 2, Math.max(-32768, Math.min(32767, Math.round(v))), true);
             }
             if (ev && ++pos >= ev.sig.len) { wait = ev.gap; ev = null; }
-            if (fox && ++foxPos >= fox.len) fox = null;
+            for (let i = finds.length - 1; i >= 0; i--) if (++finds[i].pos >= finds[i].sig.len) finds.splice(i, 1);
           }
           made += frames;
           onData(pkt);
@@ -780,6 +958,23 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
   async send() {}
   async close() { this.closed = true; }
 }
+
+// Demo sources for each Find function, on top of the talkers and claps. The wearer turns slowly, so
+// everything drifts round the array; the leader also walks nearer and farther.
+function alarmBeep() {
+  const n = FS / 2, fade = 0.005 * FS;
+  return Float64Array.from({ length: n }, (_, i) => Math.sin((2 * Math.PI * 3100 * i) / FS) * Math.min(1, i / fade, (n - 1 - i) / fade));
+}
+const DEMO_FIND = {
+  follow: [{ id: "leader", sig: () => codeChirp("leader"), period: CODES.leader.period, ang: (t) => wrap(t * 9 - 60), level: (t) => 700 + 600 * Math.sin(t * 0.25) }],
+  evac: [
+    { id: "exit", sig: () => codeChirp("exit"), period: CODES.exit.period, ang: (t) => wrap(40 - t * 4), level: () => 900 },
+    { id: "exit2", sig: () => codeChirp("exit"), period: CODES.exit.period, phase: 0.23, ang: (t) => wrap(-150 - t * 4), level: () => 450 },
+    { id: "danger", sig: () => codeChirp("danger"), period: CODES.danger.period, phase: 0.11, ang: (t) => wrap(-35 - t * 4), level: () => 1200 },
+  ],
+  // a fire alarm's three 0.5 s beeps, then a pause (the "temporal-3" pattern)
+  alarm: [{ id: "alarm", sig: alarmBeep, gaps: [1, 1, 2], ang: (t) => wrap(70 - t * 4), level: () => 1500 }],
+};
 
 function demoPicture(g, t) {
   const sky = g.createLinearGradient(0, 0, 0, 240);
@@ -871,7 +1066,7 @@ function wavToFloat(buf) {
 // ------------------------------------------------------------------ app state
 
 const model = new Model();
-const beacon = new Beacon();
+const beacon = new Beacon(), alarm = new Alarm();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
 let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null, streamMask = 0xff, maskAsks = 0;
 const pktTimes = [], frameTimes = [], rxTimes = [];
@@ -1525,7 +1720,7 @@ function drawCamera(r) {
   let behindShown = false;
   for (const d of recent) {
     const fade = 1 - (now - d.t) / HOLD_S, rel = wrap(orient(d.angle) - S.offset);
-    const color = d.beacon ? FOX : d.strength > 30 ? LOUD : GLOW, latest = d === recent[recent.length - 1];
+    const color = kindColor(d), latest = d === recent[recent.length - 1];
     if (Math.abs(rel) <= half) {
       const x = xOf(rel), spread = Math.abs(xOf(rel + d.sigma) - xOf(rel - d.sigma)) / 2;
       const hw = Math.max(18, spread) * 2, g = ctx.createLinearGradient(x - hw, 0, x + hw, 0);
@@ -1543,8 +1738,9 @@ function drawCamera(r) {
       if (latest) {
         const near = Math.abs(rel) + d.sigma > half;
         labelBox(x + 14, pic.y + 0.16 * pic.h, [
-          `${d.beacon ? "Beacon" : `${d.strength > 30 ? "LOUD · " : ""}Sound`} · ${near ? "near the edge" : "in view"}`,
-          `${sideText(rel)} · ±${d.sigma.toFixed(0)}° · ${d.beacon ? `${(100 * d.score).toFixed(0)}% match` : `${d.strength.toFixed(0)} dB over quiet`}`,
+          `${d.kind ? KINDS[d.kind].name : `${d.strength > 30 ? "LOUD · " : ""}Sound`} · ${near ? "near the edge" : "in view"}`,
+          `${sideText(rel)} · ±${d.sigma.toFixed(0)}° · ${d.kind === "alarm" ? `${(d.freq / 1000).toFixed(1)} kHz tone`
+            : d.kind ? `${(100 * d.score).toFixed(0)}% match` : `${d.strength.toFixed(0)} dB over quiet`}`,
           `${(now - d.t).toFixed(1)} s ago · ${fbText(d)}`], color, pic);
       }
     } else if (latest) {
@@ -1711,7 +1907,7 @@ function drawGauge(r) {
     const [x, y] = polar(cx, cy, rad * 0.86, orient(d.angle));
     ctx.beginPath();
     ctx.arc(x, y, 5, 0, 2 * Math.PI);
-    ctx.fillStyle = alpha(d.beacon ? FOX : d.strength > 30 ? LOUD : GLOW, 0.6 * (1 - age / 6));
+    ctx.fillStyle = alpha(kindColor(d), 0.6 * (1 - age / 6));
     ctx.fill();
   }
   const d = model.last;
@@ -1734,10 +1930,10 @@ function drawGauge(r) {
     ctx.moveTo(cx, cy);
     ctx.arc(cx, cy, rad - 8, canvasAngle(a + d.sigma), canvasAngle(a - d.sigma));
     ctx.closePath();
-    ctx.fillStyle = alpha(d.beacon ? FOX : GLOW, 0.25 * fade);
+    ctx.fillStyle = alpha(d.kind ? kindColor(d) : GLOW, 0.25 * fade);
     ctx.fill();
     const [x, y] = polar(cx, cy, rad - 8, a);
-    ctx.strokeStyle = alpha(d.beacon ? FOX : "#ff7b72", fade);
+    ctx.strokeStyle = alpha(d.kind ? kindColor(d) : "#ff7b72", fade);
     ctx.lineWidth = 5;
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -1750,7 +1946,8 @@ function drawGauge(r) {
     text(`${sideText(a)} · ${whereTxt}`, r.cx, r.y + 42, 19, INK, "center", true);
     text(`${fbText(d)} · ${d.n} mics`, r.cx, r.y + 62, 12, DIM, "center", false, true);
   } else {
-    text(S.find ? "listening for the beacon…" : "clap, snap or talk", r.cx, r.y + 46, 15, DIM, "center");
+    const idle = { follow: "listening for the leader…", alarm: "listening for an alarm…", evac: "listening for exit and danger tones…" };
+    text(S.find ? idle[S.findMode] : "clap, snap or talk", r.cx, r.y + 46, 15, DIM, "center");
   }
   ctx.beginPath();
   ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
@@ -1843,44 +2040,106 @@ function drawTranscript(r) {
 }
 
 // Find mode's panel (in place of the transcript): which way to turn, and warmer / colder from the loudness
+const turnText = (a) => (Math.abs(a) < 10 ? "Straight ahead" : Math.abs(a) > 165 ? "Behind you"
+  : `Turn ${a > 0 ? "left" : "right"} ${Math.abs(a).toFixed(0)}°`);
+const whereText = (a) => (Math.abs(a) < 15 ? "ahead" : Math.abs(a) > 165 ? "behind you"
+  : `${Math.abs(a).toFixed(0)}° ${a > 0 ? "left" : "right"}`);
+const trendText = (t) => (t > 2.5 ? ["Getting closer ▲", FOX] : t < -2.5 ? ["Getting farther ▼", LOUD] : ["Same distance", DIM]);
+const beaconUrl = (role) => `${location.host}${location.pathname.replace(/[^/]*$/, "")}beacon.html?role=${role}`;
+
 function drawFinder(r) {
-  panel(r, "Find the beacon");
-  const s = beacon.summary(), inner = R(r.x + 14, r.y + 34, r.w - 28, r.h - 44);
-  if (!s || s.age > 6) {
-    const url = `${location.host}${location.pathname.replace(/[^/]*$/, "")}beacon.html`;
-    const lines = ["Listening for the beacon…", "", "On another phone, open", url, "and tap Start. (Demo has one built in.)"];
+  panel(r, `Find · ${FIND_MODES[S.findMode].name}`);
+  const inner = R(r.x + 14, r.y + 34, r.w - 28, r.h - 44);
+  const rad = Math.max(18, Math.min(inner.h * 0.38, inner.w * 0.18, 64)), cx = inner.x + rad + 4, cy = inner.y + rad + 8;
+  const tx = cx + rad + 18, big = Math.min(24, (inner.r - tx) / 8);
+  const dial = (arrows, wedges = []) => {
+    ctx.strokeStyle = EDGE;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
+    ctx.stroke();
+    text("ahead", cx, cy - rad - 6, 10, DIM, "center");
+    for (const [a, col] of wedges) {  // keep-away zones
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, rad, canvasAngle(a + 25), canvasAngle(a - 25));
+      ctx.closePath();
+      ctx.fillStyle = alpha(col, 0.35);
+      ctx.fill();
+    }
+    ctx.lineCap = "round";
+    for (const [a, col, w] of arrows) {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(...polar(cx, cy, rad * 0.85, a));
+      ctx.stroke();
+    }
+    ctx.lineCap = "butt";
+  };
+  const idle = (lines, urls = []) => {
     ctx.font = font(13);
     let y = inner.y + 8;
     for (const l of lines) {
-      for (const w of wrapLines(l, inner.w)) { text(w, inner.x, y, l === url ? 13 : 14, l === url ? FOX : l === lines[0] ? INK : DIM, "left", l === lines[0]); y += 19; }
+      const isUrl = urls.includes(l);
+      for (const w of wrapLines(l, inner.w)) {
+        text(w, inner.x, y, isUrl ? 13 : 14, isUrl ? FOX : l === lines[0] ? INK : DIM, "left", l === lines[0]);
+        y += 19;
+      }
     }
+  };
+  const noBack = (d) => d.fb === null;
+
+  if (S.findMode === "follow") {
+    const s = tracks(beacon.dets, "leader", 6)[0];
+    if (!s) return idle(["Listening for the leader's tone…", "", "The leader opens this on their phone and taps Start:", beaconUrl("leader"), "(Demo has one built in.)"], [beaconUrl("leader")]);
+    const a = orient(s.angle), fresh = s.age < 2, col = fresh ? FOX : DIM, trend = trendText(s.trend);
+    dial([[a, col, 6]]);
+    text(fresh ? turnText(a) : `Lost them · last ${turnText(a).toLowerCase()}`, tx, cy - 22, big, col, "left", true);
+    text(trend[0], tx, cy + 6, 15, fresh ? trend[1] : DIM, "left", true);
+    text(`heard ${s.age.toFixed(1)} s ago · ${(100 * s.last.score).toFixed(0)}% match`, tx, cy + 28, 12, DIM);
+    if (noBack(s.last)) text("no back mic: could also be behind", tx, cy + 46, 12, DIM);
     return;
   }
-  const a = orient(s.angle), fresh = s.age < 2, col = fresh ? FOX : DIM;
-  const rad = Math.max(18, Math.min(inner.h * 0.38, inner.w * 0.18, 64)), cx = inner.x + rad + 4, cy = inner.y + rad + 8;
-  ctx.strokeStyle = EDGE;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
-  ctx.stroke();
-  text("ahead", cx, cy - rad - 6, 10, DIM, "center");
-  const tip = polar(cx, cy, rad * 0.85, a);
-  ctx.strokeStyle = col;
-  ctx.lineWidth = 6;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(...tip);
-  ctx.stroke();
-  ctx.lineCap = "butt";
-  const abs = Math.abs(a), side = a > 0 ? "left" : "right";
-  const turn = abs < 10 ? "Straight ahead" : abs > 165 ? "Behind you" : `Turn ${side} ${abs.toFixed(0)}°`;
-  const trend = s.trend > 1.5 ? ["Getting closer ▲", FOX] : s.trend < -1.5 ? ["Getting farther ▼", LOUD] : ["Same distance", DIM];
-  const tx = cx + rad + 18, tw = inner.r - tx;
-  text(fresh ? turn : `Lost it · last ${turn.toLowerCase()}`, tx, cy - 22, Math.min(24, tw / 8), col, "left", true);
-  text(trend[0], tx, cy + 6, 15, fresh ? trend[1] : DIM, "left", true);
-  text(`heard ${s.age.toFixed(1)} s ago · ${(100 * s.last.score).toFixed(0)}% match`, tx, cy + 28, 12, DIM);
-  if (s.last.fb === null) text("no back mic: could also be behind", tx, cy + 46, 12, DIM);
+
+  if (S.findMode === "alarm") {
+    const all = tracks(alarm.dets, "alarm", 6, [5, 10], 2).sort((a, b) => b.hits - a.hits), s = all[0];  // steadiest first
+    if (!s) return idle(["Listening for an alarm…", "", "Smoke and fire alarms, beeping or steady. Press a smoke alarm's test button to try it (or use Demo)."]);
+    const a = orient(s.angle), fresh = s.age < 5, col = fresh ? ALARM_COL : DIM, trend = trendText(s.trend);
+    dial(all.slice(1).map((o) => [orient(o.angle), alpha(ALARM_COL, 0.4), 3]).concat([[a, col, 6]]));
+    text(fresh ? `Alarm ${whereText(a)}` : `Alarm stopped · was ${whereText(a)}`, tx, cy - 22, big, col, "left", true);
+    text(`${(s.last.freq / 1000).toFixed(1)} kHz · ${alarm.pattern(s.last.freq)}`, tx, cy + 6, 14, INK);
+    text(fresh ? (trend[0] === "Same distance" ? "" : trend[0]) : "", tx, cy + 28, 13, trend[1], "left", true);
+    text(all.length > 1 ? `${all.length} alarms heard · loudest shown` : noBack(s.last) ? "no back mic: could also be behind" : "",
+      tx, cy + 46, 12, DIM);
+    return;
+  }
+
+  const exits = tracks(beacon.dets, "exit", 4).filter((e) => e.age < 3);
+  const dangers = tracks(beacon.dets, "danger", 4).filter((d) => d.age < 3);
+  if (!exits.length && !dangers.length) {
+    return idle(["Listening for exit and danger tones…", "", "A phone at each exit opens", beaconUrl("exit"), "and one where it isn't safe opens", beaconUrl("danger"), "(Demo has both built in.)"],
+      [beaconUrl("exit"), beaconUrl("danger")]);
+  }
+  // an exit in the same direction as a danger may be past it: steer to another one if there is one
+  const blocked = (e) => dangers.some((d) => Math.abs(wrap(orient(d.angle) - orient(e.angle))) < 35);
+  const best = exits.find((e) => !blocked(e)) || exits[0];
+  dial(exits.filter((e) => e !== best).map((e) => [orient(e.angle), alpha(FOX, 0.45), 3])
+    .concat(best ? [[orient(best.angle), blocked(best) ? DIM : FOX, 6]] : []),
+    dangers.map((d) => [orient(d.angle), DANGER]));
+  if (best) {
+    const a = orient(best.angle), trend = trendText(best.trend);
+    text(blocked(best) ? "Exit is past the danger" : `Exit: ${turnText(a).replace("Turn ", "turn ")}`, tx, cy - 22, big, blocked(best) ? DANGER : FOX, "left", true);
+    text(trend[0], tx, cy + 4, 14, trend[1], "left", true);
+  } else {
+    text("No exit heard yet", tx, cy - 22, big, DIM, "left", true);
+  }
+  text(dangers.length ? `Danger ${whereText(orient(dangers[0].angle))} · keep away` : "No danger heard", tx, cy + 26, 15,
+    dangers.length ? DANGER : DIM, "left", true);
+  const d0 = (best || dangers[0]).last;
+  text(`${exits.length} exit${exits.length === 1 ? "" : "s"}, ${dangers.length} danger${dangers.length === 1 ? "" : "s"}${noBack(d0) ? " · no back mic: front/back unsure" : ""}`,
+    tx, cy + 46, 12, DIM);
 }
 
 let lastDraw = 0;
@@ -1969,13 +2228,25 @@ setInterval(() => {
 setInterval(() => {
   const t0 = performance.now();
   model.tick(S.thr, t0 < cap.voiceUntil);
-  if (S.find) {
-    const d = beacon.process();
-    // a buzz when the beacon is straight ahead, so you can walk toward it without watching the screen
-    if (d && Math.abs(orient(d.angle)) < 12) navigator.vibrate?.(60);
-  }
+  if (S.find) findBuzz(S.findMode === "alarm" ? alarm.process() : beacon.process(FIND_MODES[S.findMode].codes));
   busy.ms += performance.now() - t0;
 }, 33);
+
+// Buzzes, so you can move without watching the screen: a tap when the leader or an exit is straight ahead,
+// a double buzz when you face a danger, a long one when an alarm starts.
+let buzzAt = -99, lastAlarm = -99;
+function findBuzz(found) {
+  if (!found.length || !navigator.vibrate) return;
+  const now = model.now, ahead = (d, deg) => Math.abs(orient(d.angle)) < deg;
+  if (S.findMode === "alarm") {
+    if (now - lastAlarm > 15) navigator.vibrate([400, 150, 400]);
+    lastAlarm = now;
+  } else if (found.some((d) => d.kind === "danger" && ahead(d, 20))) {
+    if (now - buzzAt > 1.5) { navigator.vibrate([150, 80, 150]); buzzAt = now; }
+  } else if (found.some((d) => (d.kind === "leader" || d.kind === "exit") && ahead(d, 12))) {
+    navigator.vibrate(60);
+  }
+}
 
 // ------------------------------------------------------------------ controls
 
@@ -1984,6 +2255,8 @@ const hint = (t) => { $("hint").textContent = t; };
 function uiSync() {
   $("cc").classList.toggle("on", cap.on);
   $("find").classList.toggle("on", S.find);
+  $("findmode").classList.toggle("hidden", !S.find);
+  $("findmode").value = S.findMode;
   $("focus").classList.toggle("on", S.focus);
   $("swaplr").classList.toggle("on", S.swap);
   $("swapfb").classList.toggle("on", S.swapfb);
@@ -2069,9 +2342,14 @@ function setFind(on) {
   model.dets = [];
   model.last = null;
   beacon.reset();
+  alarm.reset();
   if (on && cap.on) { setCC(false); asrUnload(); }
-  hint(on ? "Find: tap Start on another phone's beacon page; follow the green arrow, it buzzes when straight ahead"
-    : "Clap ahead → Set centre · clap at the right edge → Right edge");
+  const hints = {
+    follow: "Follow: the leader plays the Leader tone (beacon page); follow the green arrow, it buzzes when they're straight ahead",
+    alarm: "Alarm: shows which way a beeping or steady alarm is; long buzz when one starts",
+    evac: "Evacuate: phones play Exit or Danger tones (beacon page); go where the green arrow points, away from red",
+  };
+  hint(on ? hints[S.findMode] : "Clap ahead → Set centre · clap at the right edge → Right edge");
 }
 
 $("cc").onclick = () => {
@@ -2082,6 +2360,7 @@ $("cc").onclick = () => {
   uiSync();
 };
 $("find").onclick = () => { setFind(!S.find); save(); uiSync(); };
+$("findmode").onchange = (e) => { S.findMode = e.target.value; setFind(true); save(); uiSync(); };
 $("focus").onclick = () => { S.focus = !S.focus; save(); uiSync(); };
 
 async function connect(c) {
