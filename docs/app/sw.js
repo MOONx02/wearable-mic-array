@@ -1,7 +1,7 @@
 // Keeps the app usable with no internet. The speech models are not cached here: Vosk keeps its own copy
 // in IndexedDB and Moonshine in the "transformers-cache" store after the first download.
-const CACHE = "mic360-v9";
-const CORE = ["./", "index.html", "app.js", "asr_worker.js", "lib/vosk.js", "lib/transformers.js",
+const CACHE = "mic360-v11";
+const CORE = ["./", "index.html", "beacon.html", "app.js", "asr_worker.js", "lib/vosk.js", "lib/transformers.js",
               "manifest.json", "icon-192.png", "icon-512.png",
               "demo/tts_a1.wav", "demo/tts_a2.wav", "demo/tts_b1.wav"];
 
@@ -28,7 +28,8 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.includes("/models/")) return;
   // network first so updates arrive, the saved copy when offline (or when Wi-Fi has no internet)
-  const fromNet = fetch(e.request).then((r) => {
+  // no-cache: GitHub Pages lets the browser keep files for 10 minutes, which would hide an update
+  const fromNet = fetch(new Request(e.request, { cache: "no-cache" })).then((r) => {
     if (r.ok) {
       const copy = r.clone();
       caches.open(CACHE).then((c) => c.put(e.request, copy));

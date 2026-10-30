@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0d1117">
+<title>Beacon · Mic array 360</title>
+<link rel="icon" href="icon-192.png">
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1117; color: #e6edf3;
+    font: 16px -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+    padding: 24px; box-sizing: border-box; text-align: center; }
+  h1 { margin: 0; font-size: 26px; }
+  p { margin: 0; color: #8b949e; max-width: 460px; line-height: 1.45; }
+  #go { font: inherit; font-size: 24px; padding: 26px 56px; border-radius: 18px; border: 2px solid #3fb950;
+    background: #21262d; color: #e6edf3; }
+  #go.on { background: #238636; }
+  #pulse { width: 22px; height: 22px; border-radius: 50%; background: #30363d; }
+  #pulse.lit { background: #3fb950; }
+  label { color: #8b949e; }
+  input[type=range] { width: 220px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>Beacon</h1>
+<p>This phone plays a short rising chirp twice a second. The mic-array tablet in <b>Find</b> mode points to it.
+Put this phone on (or in) the thing you want to find, or hand it to the person you're looking for.</p>
+<button id="go">Start</button>
+<div id="pulse"></div>
+<label>Volume <input id="vol" type="range" min="0.1" max="1" step="0.05" value="1"></label>
+<p>Turn the phone's media volume up. Keep this page open; the screen stays on while it plays.</p>
+<script>
+"use strict";
+// Same chirp as BEACON in app.js: 2.5 → 6.5 kHz over 150 ms, 10 ms fades, every 0.5 s.
+const BEACON = { f0: 2500, f1: 6500, dur: 0.15, period: 0.5 };
+let ac = null, src = null, gain = null, lock = null, blink = null;
+
+function buffer(ctx) {
+  const sr = ctx.sampleRate, n = Math.round(BEACON.period * sr), len = Math.round(BEACON.dur * sr);
+  const b = ctx.createBuffer(1, n, sr), d = b.getChannelData(0);
+  const rate = (BEACON.f1 - BEACON.f0) / BEACON.dur, fade = 0.01 * sr;
+  for (let i = 0; i < len; i++) {
+    const t = i / sr, e = Math.min(1, i / fade, (len - 1 - i) / fade);
+    d[i] = 0.9 * Math.sin(2 * Math.PI * (BEACON.f0 * t + 0.5 * rate * t * t)) * (0.5 - 0.5 * Math.cos(Math.PI * e));
+  }
+  return b;
+}
+
+async function start() {
+  ac = ac || new AudioContext();
+  await ac.resume();
+  gain = ac.createGain();
+  gain.gain.value = +document.getElementById("vol").value;
+  gain.connect(ac.destination);
+  src = ac.createBufferSource();
+  src.buffer = buffer(ac);
+  src.loop = true;
+  src.connect(gain);
+  const t0 = ac.currentTime + 0.05;
+  src.start(t0);
+  blink = setInterval(() => {
+    const ph = ((ac.currentTime - t0) % BEACON.period + BEACON.period) % BEACON.period;
+    document.getElementById("pulse").classList.toggle("lit", ph < BEACON.dur);
+  }, 30);
+  await keepAwake();
+}
+
+async function keepAwake() {
+  try {
+    lock = await navigator.wakeLock?.request("screen");
+    lock?.addEventListener("release", () => { lock = null; });  // the browser drops it when the page is hidden
+  } catch (e) { /* not allowed: the screen may sleep */ }
+}
+
+function stop() {
+  try { src?.stop(); } catch (e) { /* not started */ }
+  src = null;
+  clearInterval(blink);
+  document.getElementById("pulse").classList.remove("lit");
+  lock?.release();
+  lock = null;
+}
+
+const go = document.getElementById("go");
+go.onclick = async () => {
+  const on = !go.classList.contains("on");
+  if (on) await start(); else stop();
+  go.classList.toggle("on", on);
+  go.textContent = on ? "Stop" : "Start";
+};
+document.getElementById("vol").oninput = (e) => { if (gain) gain.gain.value = +e.target.value; };
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "visible" && src && !lock) await keepAwake();
+});
+if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>

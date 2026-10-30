@@ -22,7 +22,8 @@ const PRESETS = {
 };
 
 const S = Object.assign({ layout: "rear5", hfov: 60, offset: 0, swap: false, swapfb: false, rotate: 0,
-                          mirror: false, thr: 12, cc: true, focus: true }, JSON.parse(localStorage.getItem("mic360") || "{}"));
+                          mirror: false, thr: 12, cc: true, focus: true, find: false }, JSON.parse(localStorage.getItem("mic360") || "{}"));
+if (S.find) S.cc = false;
 if (!PRESETS[S.layout]) S.layout = "rear5";
 const save = () => localStorage.setItem("mic360", JSON.stringify(S));
 const wrap = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
@@ -150,7 +151,7 @@ class Model {
       }
       this.dead[c] = hi - lo < DEAD_PTP || same > STUCK_FRACTION * h.length;
     }
-    this.direction(thr, voice);
+    if (!S.find) this.direction(thr, voice);  // in Find mode only the beacon is shown
   }
 
   // Channel that carries the mic at geometry slot ch: itself, or its data-line partner when the mic is
@@ -170,8 +171,8 @@ class Model {
     return out;
   }
 
-  steering(chans, top = BAND[1]) {
-    const key = chans.join(",") + "@" + top;
+  steering(chans, top = BAND[1], lo = BAND[0]) {
+    const key = chans.join(",") + "@" + lo + "-" + top;
     let st = this.steer.get(key);
     if (st) return st;
     const pos = chans.map((c) => [this.geom[c][1] / 1000, this.geom[c][2] / 1000]);
@@ -198,7 +199,7 @@ class Model {
     }
     // GCC-PHAT is only needed at the lags the array can produce, so evaluate those directly instead of
     // an 8x zero-padded inverse FFT per pair.
-    const k0 = Math.ceil((BAND[0] * NFFT) / FS), k1 = Math.floor((top * NFFT) / FS);
+    const k0 = Math.ceil((lo * NFFT) / FS), k1 = Math.floor((top * NFFT) / FS);
     const nb = k1 - k0 + 1, L = 2 * m + 1, N = NFFT * INTERP;
     const cosT = new Float32Array(L * nb), sinT = new Float32Array(L * nb);
     for (let l = 0; l < L; l++) {
@@ -211,6 +212,17 @@ class Model {
     st = { pairs, m, L, k0, nb, cosT, sinT, hasBack: ptpy > 0.01 };
     this.steer.set(key, st);
     return st;
+  }
+
+  // samples [start, start + n) of channel c on the stream clock (must still be in the 2 s buffer)
+  at(c, start, n, out) {
+    const buf = this.x[c];
+    let r = (((this.wp - (this.total - start)) % this.N) + this.N) % this.N;
+    for (let i = 0; i < n; i++) {
+      out[i] = buf[r];
+      if (++r === this.N) r = 0;
+    }
+    return out;
   }
 
   srp(srcs, st) {
@@ -258,23 +270,184 @@ class Model {
     // while someone talks, show the whole phrase's direction (as the subtitles do), not one 64 ms snapshot
     const phrase = voice ? speechCurve() : null;
     const curve = phrase && phrase.n >= 5 ? phrase.sum : this.srp(srcs, st);
-    let k = 0;
-    for (let i = 1; i < 360; i++) if (curve[i] > curve[k]) k = i;
-    let angle = k - 180;
-    const peak = curve[k], sorted = Array.from(curve).sort((a, b) => a - b);
-    const base = (sorted[179] + sorted[180]) / 2, span = Math.max(peak - base, 1e-9);
-    const cut = peak - 0.3 * span;
-    let lo = k, hi = k;
-    while (curve[(lo - 1 + 360) % 360] >= cut && k - lo < 179) lo--;
-    while (curve[(hi + 1) % 360] >= cut && hi - k < 179) hi++;
-    const sigma = Math.min(60, Math.max(3, (hi - lo) / 2));
-    let fb = null;
-    if (st.hasBack) fb = (peak - curve[(((Math.round(wrap(180 - angle)) + 180) % 360) + 360) % 360]) / span;
-    else if (Math.abs(angle) > 90) angle = Math.sign(angle) * (180 - Math.abs(angle));
-    const det = { t: this.now, angle, sigma, fb, strength, curve, n: act.length };
+    this.add({ t: this.now, ...pick(curve, st), strength, curve, n: act.length });
+  }
+
+  add(det) {
     this.dets.push(det);
     this.last = det;
     while (this.dets.length && this.now - this.dets[0].t > HISTORY_S) this.dets.shift();
+  }
+}
+
+// Peak of an SRP curve: angle, spread (sigma) and how sure front vs back is (null without a back mic,
+// and then the angle is folded into the front half).
+function pick(curve, st) {
+  let k = 0;
+  for (let i = 1; i < 360; i++) if (curve[i] > curve[k]) k = i;
+  let angle = k - 180;
+  const peak = curve[k], sorted = Array.from(curve).sort((a, b) => a - b);
+  const base = (sorted[179] + sorted[180]) / 2, span = Math.max(peak - base, 1e-9);
+  const cut = peak - 0.3 * span;
+  let lo = k, hi = k;
+  while (curve[(lo - 1 + 360) % 360] >= cut && k - lo < 179) lo--;
+  while (curve[(hi + 1) % 360] >= cut && hi - k < 179) hi++;
+  const sigma = Math.min(60, Math.max(3, (hi - lo) / 2));
+  let fb = null;
+  if (st.hasBack) fb = (peak - curve[(((Math.round(wrap(180 - angle)) + 180) % 360) + 360) % 360]) / span;
+  else if (Math.abs(angle) > 90) angle = Math.sign(angle) * (180 - Math.abs(angle));
+  return { angle, sigma, fb };
+}
+
+// ------------------------------------------------------------------ beacon finder ("fox and hound")
+
+// The beacon is a rising chirp, 2.5 → 6.5 kHz over 150 ms, every half second (beacon.html plays it; keep
+// the two in step). Voices, fans and claps don't look like it, so a matched filter finds it well under
+// the noise, and SRP-PHAT over just its band gives the direction.
+const BEACON = { f0: 2500, f1: 6500, dur: 0.15, period: 0.5 };
+const BLEN = Math.round(BEACON.dur * FS), BN = 8192, BEACON_SCORE = 0.3, FOX = "#3fb950";
+
+function beaconChirp() {
+  const out = new Float64Array(BLEN), rate = (BEACON.f1 - BEACON.f0) / BEACON.dur, fade = 0.01 * FS;
+  for (let i = 0; i < BLEN; i++) {
+    const t = i / FS, e = Math.min(1, i / fade, (BLEN - 1 - i) / fade);
+    out[i] = Math.sin(2 * Math.PI * (BEACON.f0 * t + 0.5 * rate * t * t)) * (0.5 - 0.5 * Math.cos(Math.PI * e));
+  }
+  return out;
+}
+
+class Beacon {
+  constructor() {
+    this.fft = makeFFT(BN);
+    this.k0 = Math.floor(((BEACON.f0 - 300) * BN) / FS);
+    this.k1 = Math.ceil(((BEACON.f1 + 300) * BN) / FS);
+    const re = new Float64Array(BN), im = new Float64Array(BN);
+    re.set(beaconChirp());
+    this.fft(re, im);
+    // analytic template (positive frequencies only, doubled), so the filter output's size is its envelope
+    const nb = this.k1 - this.k0 + 1;
+    this.tRe = new Float64Array(nb);
+    this.tIm = new Float64Array(nb);
+    let e = 0;
+    for (let b = 0; b < nb; b++) {
+      this.tRe[b] = 2 * re[this.k0 + b];
+      this.tIm[b] = 2 * im[this.k0 + b];
+      e += this.tRe[b] ** 2 + this.tIm[b] ** 2;
+    }
+    this.tNorm = Math.sqrt(e / BN);
+    this.done = 0;  // stream sample up to which chirp starts have been checked
+    this.dets = [];
+    this.buf = new Float32Array(BN);
+  }
+
+  reset() { this.done = model.total; this.dets = []; }
+
+  // Matched filter over the chirp starts since the last call; on a hit, the direction from the chirp itself.
+  process() {
+    const act = model.active();
+    if (act.length < 2 || model.total < FS) return;
+    let adv = model.total - this.done;
+    if (adv < 2048) return;
+    if (adv > BN - BLEN) adv = BN - BLEN;
+    const W = adv + BLEN, start = model.total - W, srcs = act.map((a) => a[1]);
+    const score = new Float64Array(adv), energy = new Float64Array(adv), outs = [];
+    const re = new Float64Array(BN), im = new Float64Array(BN), yr = new Float64Array(BN), yi = new Float64Array(BN);
+    for (const s of srcs) {
+      model.at(s, start, W, this.buf);
+      re.fill(0);
+      im.fill(0);
+      for (let i = 0; i < W; i++) re[i] = this.buf[i];
+      this.fft(re, im);
+      // two inverse FFTs (forward FFT of the conjugate): the filter output, and the band-limited signal
+      // whose energy normalises it
+      yr.fill(0);
+      yi.fill(0);
+      const cr = new Float64Array(BN), ci = new Float64Array(BN);
+      for (let k = this.k0, b = 0; k <= this.k1; k++, b++) {
+        const xr = 2 * re[k], xi = 2 * im[k];
+        cr[k] = xr * this.tRe[b] + xi * this.tIm[b];
+        ci[k] = -(xi * this.tRe[b] - xr * this.tIm[b]);
+        yr[k] = xr;
+        yi[k] = -xi;
+      }
+      this.fft(cr, ci);
+      this.fft(yr, yi);
+      outs.push([cr, ci]);
+      const cum = new Float64Array(W + 1);
+      for (let i = 0; i < W; i++) cum[i + 1] = cum[i] + (yr[i] * yr[i] + yi[i] * yi[i]) / (BN * BN);
+      for (let p = 0; p < adv; p++) {
+        const e = cum[p + BLEN] - cum[p];
+        energy[p] += e;
+        score[p] += Math.hypot(cr[p], ci[p]) / BN / (Math.sqrt(e) * this.tNorm + 1e-9);
+      }
+    }
+    this.done = model.total;
+    let p = 0;
+    for (let i = 1; i < adv; i++) if (score[i] > score[p]) p = i;
+    const sc = score[p] / srcs.length;
+    const t = (start + p) / FS;
+    const prev = this.dets[this.dets.length - 1];
+    if (sc < BEACON_SCORE || (prev && t - prev.at < 0.25)) return;
+    const st = model.steering(act.map((a) => a[0]), BEACON.f1, BEACON.f0);
+    const curve = this.pulseSRP(outs, p, st);
+    const level = 10 * Math.log10(energy[p] / srcs.length / BLEN / (32768 * 32768) + 1e-12);
+    const det = { t: model.now, at: t, ...pick(curve, st), strength: 0, curve, n: act.length, beacon: true, score: sc, level };
+    this.dets.push(det);
+    while (this.dets.length > 40) this.dets.shift();
+    model.add(det);
+    return det;
+  }
+
+  // Direction from the matched-filter outputs: there the chirp is a pulse about 4 samples wide, so a short
+  // window around it holds the chirp and very little of the fan. Each channel's window is upsampled 8x
+  // and every mic pair cross-correlated at the lags the array can produce, then summed per angle.
+  pulseSRP(outs, p, st) {
+    const G = 64, U = G * INTERP, ups = [];
+    if (!this.f64) { this.f64 = makeFFT(G); this.fU = makeFFT(U); }
+    for (const [cr, ci] of outs) {
+      const r = new Float64Array(G), i = new Float64Array(G);
+      for (let n = 0; n < G; n++) {
+        const q = p - G / 2 + n;
+        if (q < 0) continue;
+        const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * (n + 0.5)) / G);
+        r[n] = (cr[q] / BN) * w;
+        i[n] = (-ci[q] / BN) * w;  // the inverse FFT left it conjugated
+      }
+      this.f64(r, i);
+      const ur = new Float64Array(U), ui = new Float64Array(U);
+      for (let k = 0; k < G / 2; k++) {
+        ur[k] = r[k]; ui[k] = -i[k];
+        ur[U - G / 2 + k] = r[G / 2 + k]; ui[U - G / 2 + k] = -i[G / 2 + k];
+      }
+      this.fU(ur, ui);  // conjugated input: an inverse transform, result conjugated again below
+      for (let n = 0; n < U; n++) ui[n] = -ui[n];
+      ups.push([ur, ui]);
+    }
+    const curve = new Float64Array(360), cc = new Float64Array(st.L);
+    for (const [a, b, idx] of st.pairs) {
+      const [ar, ai] = ups[a], [br, bi] = ups[b];
+      for (let l = 0; l < st.L; l++) {
+        const lag = l - st.m;
+        let s = 0;
+        for (let q = Math.max(0, -lag); q < Math.min(U, U - lag); q++) s += br[q + lag] * ar[q] + bi[q + lag] * ai[q];
+        cc[l] = s;
+      }
+      for (let k = 0; k < 360; k++) curve[k] += cc[idx[k]];
+    }
+    return curve;
+  }
+
+  // where it is now: circular mean of the last few hits, and whether it's getting louder (closer)
+  summary() {
+    const recent = this.dets.filter((d) => model.now - d.t < 3);
+    if (!recent.length) return null;
+    let x = 0, y = 0;
+    for (const d of recent.slice(-3)) { x += Math.cos((d.angle * Math.PI) / 180); y += Math.sin((d.angle * Math.PI) / 180); }
+    const angle = (Math.atan2(y, x) * 180) / Math.PI, last = recent[recent.length - 1];
+    const older = this.dets.filter((d) => model.now - d.t >= 2 && model.now - d.t < 5);
+    const mean = (a) => a.reduce((s, d) => s + d.level, 0) / a.length;
+    const trend = older.length >= 2 && recent.length >= 2 ? mean(recent.slice(-3)) - mean(older) : 0;
+    return { angle, last, trend, age: model.now - last.t };
   }
 }
 
@@ -403,6 +576,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
+const APP_VERSION = "v11";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -548,6 +722,7 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
     const t0 = performance.now();
     const cam = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(320, 240) : null;
     let camSeq = 0, camBusy = false, nextCam = 0;
+    let fox = null, foxPos = 0, nextFox = 0;  // Find mode: a beacon circling the array, nearer and farther
     return new Promise((resolve) => {
       this.timer = setInterval(() => {
         if (this.closed) { clearInterval(this.timer); return resolve(); }
@@ -577,16 +752,24 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
           dv.setUint16(8, frames, true);
           for (let f = 0; f < frames; f++) {
             if (!ev && --wait <= 0) { ev = this.next(); pos = 0; }
-            const fi = (made + f) & 65535;
+            const n = made + f, fi = n & 65535;
+            if (S.find && !fox && n >= nextFox) {
+              const t = n / FS;
+              fox = spatial(beaconChirp(), wrap(t * 9 - 60), false, 700 + 600 * Math.sin(t * 0.25), "peak");
+              foxPos = 0;
+              nextFox = n + BEACON.period * FS;
+            }
             for (let c = 0; c < CH; c++) {
               let v = -30935;
               if (c in model.geom) {
                 v = gauss() * 25 + (fan[c] ? fan[c][fi] : 0);
                 if (ev && ev.sig[c]) v += ev.sig[c][pos];
+                if (fox && fox[c]) v += fox[c][foxPos];
               }
               dv.setInt16(10 + (f * CH + c) * 2, Math.max(-32768, Math.min(32767, Math.round(v))), true);
             }
             if (ev && ++pos >= ev.sig.len) { wait = ev.gap; ev = null; }
+            if (fox && ++foxPos >= fox.len) fox = null;
           }
           made += frames;
           onData(pkt);
@@ -688,8 +871,9 @@ function wavToFloat(buf) {
 // ------------------------------------------------------------------ app state
 
 const model = new Model();
+const beacon = new Beacon();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
-let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null, streamMask = 0xff;
+let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null, streamMask = 0xff, maskAsks = 0;
 const pktTimes = [], frameTimes = [], rxTimes = [];
 const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
 
@@ -1140,6 +1324,8 @@ async function asrLoad() {
     if (!window.Vosk) await loadScript("lib/vosk.js");
     // the model is cached under its URL inside the recognizer's worker, so the URL has to stay the same
     const vm = await Vosk.createModel(new URL(MODEL_URL, location.href).href, -1);
+    if (!cap.on) { vm.terminate?.(); asr.loading = false; asr.status = ""; return; }  // turned off while loading
+    asr.model = vm;
     const rec = new vm.KaldiRecognizer(FS);
     rec.on("partialresult", (m) => {
       const t = (m.result.partial || "").trim();
@@ -1339,7 +1525,7 @@ function drawCamera(r) {
   let behindShown = false;
   for (const d of recent) {
     const fade = 1 - (now - d.t) / HOLD_S, rel = wrap(orient(d.angle) - S.offset);
-    const color = d.strength > 30 ? LOUD : GLOW, latest = d === recent[recent.length - 1];
+    const color = d.beacon ? FOX : d.strength > 30 ? LOUD : GLOW, latest = d === recent[recent.length - 1];
     if (Math.abs(rel) <= half) {
       const x = xOf(rel), spread = Math.abs(xOf(rel + d.sigma) - xOf(rel - d.sigma)) / 2;
       const hw = Math.max(18, spread) * 2, g = ctx.createLinearGradient(x - hw, 0, x + hw, 0);
@@ -1357,8 +1543,8 @@ function drawCamera(r) {
       if (latest) {
         const near = Math.abs(rel) + d.sigma > half;
         labelBox(x + 14, pic.y + 0.16 * pic.h, [
-          `${d.strength > 30 ? "LOUD · " : ""}Sound · ${near ? "near the edge" : "in view"}`,
-          `${sideText(rel)} · ±${d.sigma.toFixed(0)}° · ${d.strength.toFixed(0)} dB over quiet`,
+          `${d.beacon ? "Beacon" : `${d.strength > 30 ? "LOUD · " : ""}Sound`} · ${near ? "near the edge" : "in view"}`,
+          `${sideText(rel)} · ±${d.sigma.toFixed(0)}° · ${d.beacon ? `${(100 * d.score).toFixed(0)}% match` : `${d.strength.toFixed(0)} dB over quiet`}`,
           `${(now - d.t).toFixed(1)} s ago · ${fbText(d)}`], color, pic);
       }
     } else if (latest) {
@@ -1525,7 +1711,7 @@ function drawGauge(r) {
     const [x, y] = polar(cx, cy, rad * 0.86, orient(d.angle));
     ctx.beginPath();
     ctx.arc(x, y, 5, 0, 2 * Math.PI);
-    ctx.fillStyle = alpha(d.strength > 30 ? LOUD : GLOW, 0.6 * (1 - age / 6));
+    ctx.fillStyle = alpha(d.beacon ? FOX : d.strength > 30 ? LOUD : GLOW, 0.6 * (1 - age / 6));
     ctx.fill();
   }
   const d = model.last;
@@ -1548,10 +1734,10 @@ function drawGauge(r) {
     ctx.moveTo(cx, cy);
     ctx.arc(cx, cy, rad - 8, canvasAngle(a + d.sigma), canvasAngle(a - d.sigma));
     ctx.closePath();
-    ctx.fillStyle = alpha(GLOW, 0.25 * fade);
+    ctx.fillStyle = alpha(d.beacon ? FOX : GLOW, 0.25 * fade);
     ctx.fill();
     const [x, y] = polar(cx, cy, rad - 8, a);
-    ctx.strokeStyle = alpha("#ff7b72", fade);
+    ctx.strokeStyle = alpha(d.beacon ? FOX : "#ff7b72", fade);
     ctx.lineWidth = 5;
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -1564,7 +1750,7 @@ function drawGauge(r) {
     text(`${sideText(a)} · ${whereTxt}`, r.cx, r.y + 42, 19, INK, "center", true);
     text(`${fbText(d)} · ${d.n} mics`, r.cx, r.y + 62, 12, DIM, "center", false, true);
   } else {
-    text("clap, snap or talk", r.cx, r.y + 46, 15, DIM, "center");
+    text(S.find ? "listening for the beacon…" : "clap, snap or talk", r.cx, r.y + 46, 15, DIM, "center");
   }
   ctx.beginPath();
   ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
@@ -1656,6 +1842,47 @@ function drawTranscript(r) {
   ctx.restore();
 }
 
+// Find mode's panel (in place of the transcript): which way to turn, and warmer / colder from the loudness
+function drawFinder(r) {
+  panel(r, "Find the beacon");
+  const s = beacon.summary(), inner = R(r.x + 14, r.y + 34, r.w - 28, r.h - 44);
+  if (!s || s.age > 6) {
+    const url = `${location.host}${location.pathname.replace(/[^/]*$/, "")}beacon.html`;
+    const lines = ["Listening for the beacon…", "", "On another phone, open", url, "and tap Start. (Demo has one built in.)"];
+    ctx.font = font(13);
+    let y = inner.y + 8;
+    for (const l of lines) {
+      for (const w of wrapLines(l, inner.w)) { text(w, inner.x, y, l === url ? 13 : 14, l === url ? FOX : l === lines[0] ? INK : DIM, "left", l === lines[0]); y += 19; }
+    }
+    return;
+  }
+  const a = orient(s.angle), fresh = s.age < 2, col = fresh ? FOX : DIM;
+  const rad = Math.max(18, Math.min(inner.h * 0.38, inner.w * 0.18, 64)), cx = inner.x + rad + 4, cy = inner.y + rad + 8;
+  ctx.strokeStyle = EDGE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
+  ctx.stroke();
+  text("ahead", cx, cy - rad - 6, 10, DIM, "center");
+  const tip = polar(cx, cy, rad * 0.85, a);
+  ctx.strokeStyle = col;
+  ctx.lineWidth = 6;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(...tip);
+  ctx.stroke();
+  ctx.lineCap = "butt";
+  const abs = Math.abs(a), side = a > 0 ? "left" : "right";
+  const turn = abs < 10 ? "Straight ahead" : abs > 165 ? "Behind you" : `Turn ${side} ${abs.toFixed(0)}°`;
+  const trend = s.trend > 1.5 ? ["Getting closer ▲", FOX] : s.trend < -1.5 ? ["Getting farther ▼", LOUD] : ["Same distance", DIM];
+  const tx = cx + rad + 18, tw = inner.r - tx;
+  text(fresh ? turn : `Lost it · last ${turn.toLowerCase()}`, tx, cy - 22, Math.min(24, tw / 8), col, "left", true);
+  text(trend[0], tx, cy + 6, 15, fresh ? trend[1] : DIM, "left", true);
+  text(`heard ${s.age.toFixed(1)} s ago · ${(100 * s.last.score).toFixed(0)}% match`, tx, cy + 28, 12, DIM);
+  if (s.last.fb === null) text("no back mic: could also be behind", tx, cy + 46, 12, DIM);
+}
+
 let lastDraw = 0;
 function render(now) {
   requestAnimationFrame(render);
@@ -1675,7 +1902,7 @@ function draw() {
     drawCamera(R(g, g, lw - 1.5 * g, H - 2 * g));
     const gh = H * 0.44, th = H * 0.27;
     drawGauge(R(x1, g, cw, gh));
-    drawTranscript(R(x1, g + gh + g, cw, th));
+    (S.find ? drawFinder : drawTranscript)(R(x1, g + gh + g, cw, th));
     drawLevels(R(x1, 3 * g + gh + th, cw, H - 4 * g - gh - th));
   } else {
     const ch = Math.min(W * 0.82, H * 0.5);
@@ -1683,7 +1910,7 @@ function draw() {
     const y = ch + 2 * g, rh = H - y - g, gw = (W - 3 * g) * 0.56, gh = rh * 0.64;
     drawGauge(R(g, y, gw, gh));
     drawLevels(R(g, y + gh + g, gw, rh - gh - g));
-    drawTranscript(R(2 * g + gw, y, W - 3 * g - gw, rh));
+    (S.find ? drawFinder : drawTranscript)(R(2 * g + gw, y, W - 3 * g - gw, rh));
   }
 }
 
@@ -1703,7 +1930,7 @@ setInterval(() => {
   usbBytes = 0;
   usbReads = 0;
   busyAt = now;
-  let s = conn ? `${conn.name} · ${connState}` : "not connected";
+  let s = `${APP_VERSION} · ${conn ? `${conn.name} · ${connState}` : "not connected"}`;
   if (conn && (connState === "streaming" || conn instanceof DemoConn)) {
     s += ` · ${(pk * 128 / 1000).toFixed(1)} k samples/s · camera ${fps.toFixed(0)} fps`;
     // shown here vs arrived over USB vs what the board says it sent: tells where frames get lost
@@ -1715,6 +1942,8 @@ setInterval(() => {
       let k = 0;
       for (let c = 0; c < CH; c++) if (streamMask & (1 << c)) k++;
       s += ` · ${k} of ${CH} mics over USB`;
+    } else if (maskAsks > 2) {
+      s += ` · asked the board for fewer mics ${maskAsks}×, still getting all 8`;
     }
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
@@ -1734,11 +1963,17 @@ setInterval(() => {
   for (const ch of model.chans) mask |= 1 << ch;
   for (const [, src] of model.active()) mask |= 1 << src;
   conn.send(new Uint8Array([107, mask]));  // 'k'
+  maskAsks = streamMask === 0xff ? maskAsks + 1 : 0;
 }, 2000);
 
 setInterval(() => {
   const t0 = performance.now();
   model.tick(S.thr, t0 < cap.voiceUntil);
+  if (S.find) {
+    const d = beacon.process();
+    // a buzz when the beacon is straight ahead, so you can walk toward it without watching the screen
+    if (d && Math.abs(orient(d.angle)) < 12) navigator.vibrate?.(60);
+  }
   busy.ms += performance.now() - t0;
 }, 33);
 
@@ -1748,6 +1983,7 @@ const hint = (t) => { $("hint").textContent = t; };
 
 function uiSync() {
   $("cc").classList.toggle("on", cap.on);
+  $("find").classList.toggle("on", S.find);
   $("focus").classList.toggle("on", S.focus);
   $("swaplr").classList.toggle("on", S.swap);
   $("swapfb").classList.toggle("on", S.swapfb);
@@ -1810,14 +2046,42 @@ $("rec").onclick = () => {
   $("rec").classList.toggle("on", on);
   $("rec").textContent = on ? "■ Stop SD" : "● Rec SD";
 };
-$("cc").onclick = () => {
-  cap.on = !cap.on;
-  S.cc = cap.on;
-  save();
+// Captions off for Find mode: drop both speech models so their memory and CPU go back to the tablet
+// (they come back from this device's cache when CC is turned on again)
+function asrUnload() {
+  try { asr.model?.terminate?.(); } catch (e) { /* already gone */ }
+  asr.model = null;
+  asr.rec = null;
+  asr.n = 0;
+  hq.worker?.terminate();
+  Object.assign(hq, { worker: null, ready: false, failed: false, status: "", queue: [], busy: null, last: "" });
+}
+
+function setCC(on) {
+  cap.on = on;
+  S.cc = on;
   cap.interim = null;
-  if (cap.on) asrLoad();
+  if (on) asrLoad();
+}
+
+function setFind(on) {
+  S.find = on;
+  model.dets = [];
+  model.last = null;
+  beacon.reset();
+  if (on && cap.on) { setCC(false); asrUnload(); }
+  hint(on ? "Find: tap Start on another phone's beacon page; follow the green arrow, it buzzes when straight ahead"
+    : "Clap ahead → Set centre · clap at the right edge → Right edge");
+}
+
+$("cc").onclick = () => {
+  if (!cap.on && S.find) setFind(false);
+  setCC(!cap.on);
+  if (!cap.on) asrUnload();
+  save();
   uiSync();
 };
+$("find").onclick = () => { setFind(!S.find); save(); uiSync(); };
 $("focus").onclick = () => { S.focus = !S.focus; save(); uiSync(); };
 
 async function connect(c) {
@@ -1885,6 +2149,7 @@ if (!("serial" in navigator) && !("usb" in navigator)) {
     ? "This browser has no USB access: use Chrome. Demo works anywhere."
     : "Open this page from its https:// address for USB. Demo works anywhere.";
 }
+if (S.find) setFind(true);
 uiSync();
 resize();
 requestAnimationFrame(render);
