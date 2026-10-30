@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# recordings and generated output
+esp32s3/mic_takes/
+esp32s3/takes/
+*.wav
+!hud/sim/tts_*.wav
+hud/sim/recording.wav
+hud/sim/premix.npz
+hud/out/*
+!hud/out/hud_auto_t09.0.png
+!hud/out/hud_auto_t16.5.png
+!hud/out/sim_results.json

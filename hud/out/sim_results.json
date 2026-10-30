@@ -1,0 +1,72 @@
+{
+  "direction": {
+    "Samantha": {
+      "true_deg": 20.0,
+      "median_error_deg": 7.5,
+      "within_10deg": 0.5454545454545454,
+      "blocks": 77
+    },
+    "Daniel": {
+      "true_deg": -30.0,
+      "median_error_deg": 12.5,
+      "within_10deg": 0.4888888888888889,
+      "blocks": 45
+    },
+    "Alarm": {
+      "true_deg": 150.0,
+      "median_error_deg": 18.75,
+      "within_10deg": 0.0625,
+      "blocks": 16
+    }
+  },
+  "beam_gain_db": {
+    "das: beam on Samantha": {
+      "Samantha": 0.0,
+      "Daniel": -1.5,
+      "Alarm": -4.6,
+      "Fans": -2.2
+    },
+    "das: beam on Daniel": {
+      "Samantha": -0.3,
+      "Daniel": 0.0,
+      "Alarm": -3.2,
+      "Fans": -1.6
+    },
+    "mvdr: beam on Samantha": {
+      "Samantha": 0.0,
+      "Daniel": -5.7,
+      "Alarm": -2.5,
+      "Fans": -4.1
+    },
+    "mvdr: beam on Daniel": {
+      "Samantha": -2.5,
+      "Daniel": 0.0,
+      "Alarm": -1.2,
+      "Fans": -2.3
+    }
+  },
+  "auto_track": {
+    "samples_deg": [
+      0.0,
+      0.0,
+      17.0,
+      18.9,
+      18.4,
+      18.6,
+      20.8,
+      18.0,
+      18.0,
+      -23.8,
+      -21.7,
+      -23.2,
+      -25.9,
+      -25.3,
+      -25.3,
+      -25.3,
+      15.0,
+      18.5,
+      18.7,
+      20.6
+    ]
+  }
+}

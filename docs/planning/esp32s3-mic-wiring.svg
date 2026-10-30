@@ -1,0 +1,371 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1250" viewBox="0 0 1700 1250" font-family="Helvetica, Arial, sans-serif">
+<rect width="1700" height="1250" fill="white"/>
+<text x="850.0" y="46.0" font-size="28" font-weight="bold" text-anchor="middle" fill="#1f2328">XIAO ESP32-S3 Sense → 8 PDM mics: wiring for Tier A + Tier B</text>
+<text x="850.0" y="74.0" font-size="15" font-weight="normal" text-anchor="middle" fill="#57606a">One clock wire feeds all 8 mics. Each of the 4 data wires is shared by 2 mics (LEFT and RIGHT slot, chosen by the SEL pin).</text>
+<text x="850.0" y="95.0" font-size="14" font-weight="normal" text-anchor="middle" fill="#57606a">Dot = connected. Wires that cross without a dot are not connected.</text>
+<rect x="275.0" y="310.0" width="70.0" height="24.0" rx="4" fill="#d0d7de" stroke="#8c959f" stroke-width="1.5"/>
+<text x="310.0" y="302.0" font-size="12" font-weight="bold" text-anchor="middle" fill="#57606a">USB-C</text>
+<rect x="150.0" y="330.0" width="320.0" height="410.0" rx="16" fill="#1f2328" stroke="#1f2328" stroke-width="1.5"/>
+<circle cx="150.0" cy="385.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="383.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">5V</text>
+<text x="218.0" y="389.0" font-size="12" font-weight="normal" text-anchor="start" fill="#8c959f">USB 5 V in</text>
+<circle cx="150.0" cy="437.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="435.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">GND</text>
+<text x="218.0" y="441.0" font-size="12" font-weight="normal" text-anchor="start" fill="#ffffff">GND → mics</text>
+<circle cx="150.0" cy="489.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="487.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">3V3</text>
+<text x="218.0" y="493.0" font-size="12" font-weight="normal" text-anchor="start" fill="#ff8182">3V3 → mics</text>
+<circle cx="150.0" cy="541.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="539.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">D10</text>
+<text x="168.0" y="554.0" font-size="10" font-weight="normal" text-anchor="start" fill="#8c959f">GPIO9</text>
+<text x="218.0" y="545.0" font-size="12" font-weight="normal" text-anchor="start" fill="#8c959f">microSD</text>
+<circle cx="150.0" cy="593.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="591.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">D9</text>
+<text x="168.0" y="606.0" font-size="10" font-weight="normal" text-anchor="start" fill="#8c959f">GPIO8</text>
+<text x="218.0" y="597.0" font-size="12" font-weight="normal" text-anchor="start" fill="#8c959f">microSD</text>
+<circle cx="150.0" cy="645.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="643.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">D8</text>
+<text x="168.0" y="658.0" font-size="10" font-weight="normal" text-anchor="start" fill="#8c959f">GPIO7</text>
+<text x="218.0" y="649.0" font-size="12" font-weight="normal" text-anchor="start" fill="#8c959f">microSD</text>
+<circle cx="150.0" cy="697.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168.0" y="695.0" font-size="14" font-weight="bold" text-anchor="start" fill="#ffffff">D7</text>
+<text x="168.0" y="710.0" font-size="10" font-weight="normal" text-anchor="start" fill="#8c959f">GPIO44</text>
+<text x="218.0" y="701.0" font-size="12" font-weight="normal" text-anchor="start" fill="#8c959f">free (UART RX)</text>
+<circle cx="470.0" cy="385.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="383.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D0</text>
+<text x="452.0" y="398.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO1</text>
+<text x="402.0" y="389.0" font-size="12" font-weight="normal" text-anchor="end" fill="#eac54f">PDM CLK</text>
+<circle cx="470.0" cy="437.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="435.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D1</text>
+<text x="452.0" y="450.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO2</text>
+<text x="402.0" y="441.0" font-size="12" font-weight="normal" text-anchor="end" fill="#80ccff">DATA line 0</text>
+<circle cx="470.0" cy="489.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="487.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D2</text>
+<text x="452.0" y="502.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO3</text>
+<text x="402.0" y="493.0" font-size="12" font-weight="normal" text-anchor="end" fill="#8c959f">free</text>
+<circle cx="470.0" cy="541.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="539.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D3</text>
+<text x="452.0" y="554.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO4</text>
+<text x="402.0" y="545.0" font-size="12" font-weight="normal" text-anchor="end" fill="#6fdd8b">DATA line 1</text>
+<circle cx="470.0" cy="593.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="591.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D4</text>
+<text x="452.0" y="606.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO5</text>
+<text x="402.0" y="597.0" font-size="12" font-weight="normal" text-anchor="end" fill="#d2a8ff">DATA line 2</text>
+<circle cx="470.0" cy="645.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="643.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D5</text>
+<text x="452.0" y="658.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO6</text>
+<text x="402.0" y="649.0" font-size="12" font-weight="normal" text-anchor="end" fill="#ffa657">DATA line 3</text>
+<circle cx="470.0" cy="697.0" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="452.0" y="695.0" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D6</text>
+<text x="452.0" y="710.0" font-size="10" font-weight="normal" text-anchor="end" fill="#8c959f">GPIO43</text>
+<text x="402.0" y="701.0" font-size="12" font-weight="normal" text-anchor="end" fill="#8c959f">free (UART TX)</text>
+<text x="310.0" y="770.0" font-size="18" font-weight="bold" text-anchor="middle" fill="#1f2328">XIAO ESP32-S3 Sense</text>
+<text x="310.0" y="790.0" font-size="12" font-weight="normal" text-anchor="middle" fill="#57606a">pins as seen from the underside (same view as your photo)</text>
+<rect x="60.0" y="815.0" width="500.0" height="140.0" rx="8" fill="#fbfcfd" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="80.0" y="842.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f2328">Also on this board</text>
+<text x="80.0" y="866.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">LiPo 3.7 V → BAT+ / BAT− pads on the underside. Charges</text>
+<text x="80.0" y="884.2" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">over USB-C.</text>
+<text x="80.0" y="906.4" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">Snap-on Sense board: microSD (uses D8–D10), built-in test</text>
+<text x="80.0" y="924.6" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">mic (GPIO41/42, not on the edge pins), camera (unplug it).</text>
+<rect x="862.0" y="160.0" width="330.0" height="242.0" rx="10" fill="#0969da" fill-opacity="0.07" stroke="#0969da" stroke-width="1.2"/>
+<text x="1178.0" y="281.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#0969da" transform="rotate(-90 1178.0 281.0)">DATA LINE 0 → D1</text>
+<rect x="862.0" y="418.0" width="330.0" height="242.0" rx="10" fill="#1a7f37" fill-opacity="0.07" stroke="#1a7f37" stroke-width="1.2"/>
+<text x="1178.0" y="539.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#1a7f37" transform="rotate(-90 1178.0 539.0)">DATA LINE 1 → D3</text>
+<rect x="862.0" y="676.0" width="330.0" height="242.0" rx="10" fill="#8250df" fill-opacity="0.07" stroke="#8250df" stroke-width="1.2"/>
+<text x="1178.0" y="797.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#8250df" transform="rotate(-90 1178.0 797.0)">DATA LINE 2 → D4</text>
+<rect x="862.0" y="934.0" width="330.0" height="242.0" rx="10" fill="#e16f24" fill-opacity="0.07" stroke="#e16f24" stroke-width="1.2"/>
+<text x="1178.0" y="1055.0" font-size="13" font-weight="bold" text-anchor="middle" fill="#e16f24" transform="rotate(-90 1178.0 1055.0)">DATA LINE 3 → D5</text>
+<polyline points="150.0,489.0 110.0,489.0 110.0,118.0 700.0,118.0" fill="none" stroke="#d1242f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="150.0,437.0 128.0,437.0 128.0,138.0 730.0,138.0" fill="none" stroke="#24292f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="700.0,118.0 700.0,1114.0" fill="none" stroke="#d1242f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="730.0,138.0 730.0,1097.0" fill="none" stroke="#24292f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="760.0,239.0 760.0,1131.0" fill="none" stroke="#bf8700" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="694.0" y="112.0" font-size="13" font-weight="bold" text-anchor="end" fill="#d1242f">3V3</text>
+<text x="736.0" y="132.0" font-size="13" font-weight="bold" text-anchor="start" fill="#24292f">GND</text>
+<polyline points="470.0,385.0 610.0,385.0" fill="none" stroke="#bf8700" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="610.0,385.0 614.2,378.0 622.5,392.0 630.8,378.0 639.2,392.0 647.5,378.0 655.8,392.0 660.0,385.0" fill="none" stroke="#bf8700" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="660.0,385.0 760.0,385.0" fill="none" stroke="#bf8700" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="385.0" r="4.5" fill="#bf8700"/>
+<text x="635.0" y="371.0" font-size="12" font-weight="bold" text-anchor="middle" fill="#bf8700">33–100 Ω</text>
+<text x="766.0" y="287.0" font-size="13" font-weight="bold" text-anchor="start" fill="#bf8700">CLK</text>
+<polyline points="470.0,437.0 520.0,437.0 520.0,315.0 840.0,315.0" fill="none" stroke="#0969da" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="840.0,256.0 840.0,374.0" fill="none" stroke="#0969da" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="840.0" cy="315.0" r="4.5" fill="#0969da"/>
+<polyline points="700.0,188.0 900.0,188.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="188.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,205.0 900.0,205.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="205.0" r="4.5" fill="#24292f"/>
+<polyline points="730.0,222.0 900.0,222.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="730.0" cy="222.0" r="4.5" fill="#24292f"/>
+<polyline points="760.0,239.0 900.0,239.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="239.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,256.0 900.0,256.0" fill="none" stroke="#0969da" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="170.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#c8102e" stroke-width="2.2"/>
+<circle cx="900.0" cy="188.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="192.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="205.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="209.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="222.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="226.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="239.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="243.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="256.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="260.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="194.0" font-size="15" font-weight="bold" text-anchor="start" fill="#c8102e">Mic 1 · F2</text>
+<text x="1136.0" y="194.0" font-size="12" font-weight="bold" text-anchor="end" fill="#c8102e">Tier A</text>
+<text x="950.0" y="216.0" font-size="13" font-weight="bold" text-anchor="start" fill="#24292f">LEFT slot · SEL → GND</text>
+<text x="950.0" y="236.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">front, 7.5 cm right of centre</text>
+<text x="950.0" y="256.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="700.0,306.0 900.0,306.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="306.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,323.0 900.0,323.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="323.0" r="4.5" fill="#24292f"/>
+<polyline points="700.0,340.0 900.0,340.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="700.0" cy="340.0" r="4.5" fill="#d1242f"/>
+<polyline points="760.0,357.0 900.0,357.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="357.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,374.0 900.0,374.0" fill="none" stroke="#0969da" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="288.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#1f6fb2" stroke-width="2.2"/>
+<circle cx="900.0" cy="306.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="310.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="323.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="327.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="340.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="344.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="357.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="361.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="374.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="378.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="312.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f6fb2">Mic 2 · F3</text>
+<text x="1136.0" y="312.0" font-size="12" font-weight="bold" text-anchor="end" fill="#1f6fb2">Tier B</text>
+<text x="950.0" y="334.0" font-size="13" font-weight="bold" text-anchor="start" fill="#d1242f">RIGHT slot · SEL → 3V3</text>
+<text x="950.0" y="354.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">front, 2.5 cm right of centre</text>
+<text x="950.0" y="374.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="470.0,541.0 540.0,541.0 540.0,573.0 840.0,573.0" fill="none" stroke="#1a7f37" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="840.0,514.0 840.0,632.0" fill="none" stroke="#1a7f37" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="840.0" cy="573.0" r="4.5" fill="#1a7f37"/>
+<polyline points="700.0,446.0 900.0,446.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="446.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,463.0 900.0,463.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="463.0" r="4.5" fill="#24292f"/>
+<polyline points="730.0,480.0 900.0,480.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="730.0" cy="480.0" r="4.5" fill="#24292f"/>
+<polyline points="760.0,497.0 900.0,497.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="497.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,514.0 900.0,514.0" fill="none" stroke="#1a7f37" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="428.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#c8102e" stroke-width="2.2"/>
+<circle cx="900.0" cy="446.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="450.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="463.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="467.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="480.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="484.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="497.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="501.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="514.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="518.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="452.0" font-size="15" font-weight="bold" text-anchor="start" fill="#c8102e">Mic 3 · F5</text>
+<text x="1136.0" y="452.0" font-size="12" font-weight="bold" text-anchor="end" fill="#c8102e">Tier A</text>
+<text x="950.0" y="474.0" font-size="13" font-weight="bold" text-anchor="start" fill="#24292f">LEFT slot · SEL → GND</text>
+<text x="950.0" y="494.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">front, 7.5 cm left of centre</text>
+<text x="950.0" y="514.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="700.0,564.0 900.0,564.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="564.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,581.0 900.0,581.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="581.0" r="4.5" fill="#24292f"/>
+<polyline points="700.0,598.0 900.0,598.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="700.0" cy="598.0" r="4.5" fill="#d1242f"/>
+<polyline points="760.0,615.0 900.0,615.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="615.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,632.0 900.0,632.0" fill="none" stroke="#1a7f37" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="546.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#1f6fb2" stroke-width="2.2"/>
+<circle cx="900.0" cy="564.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="568.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="581.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="585.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="598.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="602.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="615.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="619.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="632.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="636.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="570.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f6fb2">Mic 4 · F4</text>
+<text x="1136.0" y="570.0" font-size="12" font-weight="bold" text-anchor="end" fill="#1f6fb2">Tier B</text>
+<text x="950.0" y="592.0" font-size="13" font-weight="bold" text-anchor="start" fill="#d1242f">RIGHT slot · SEL → 3V3</text>
+<text x="950.0" y="612.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">front, 2.5 cm left of centre</text>
+<text x="950.0" y="632.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="470.0,593.0 560.0,593.0 560.0,831.0 840.0,831.0" fill="none" stroke="#8250df" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="840.0,772.0 840.0,890.0" fill="none" stroke="#8250df" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="840.0" cy="831.0" r="4.5" fill="#8250df"/>
+<polyline points="700.0,704.0 900.0,704.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="704.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,721.0 900.0,721.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="721.0" r="4.5" fill="#24292f"/>
+<polyline points="730.0,738.0 900.0,738.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="730.0" cy="738.0" r="4.5" fill="#24292f"/>
+<polyline points="760.0,755.0 900.0,755.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="755.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,772.0 900.0,772.0" fill="none" stroke="#8250df" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="686.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#c8102e" stroke-width="2.2"/>
+<circle cx="900.0" cy="704.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="708.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="721.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="725.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="738.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="742.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="755.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="759.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="772.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="776.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="710.0" font-size="15" font-weight="bold" text-anchor="start" fill="#c8102e">Mic 5 · B1</text>
+<text x="1136.0" y="710.0" font-size="12" font-weight="bold" text-anchor="end" fill="#c8102e">Tier A</text>
+<text x="950.0" y="732.0" font-size="13" font-weight="bold" text-anchor="start" fill="#24292f">LEFT slot · SEL → GND</text>
+<text x="950.0" y="752.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">back, 15 cm right of spine</text>
+<text x="950.0" y="772.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="700.0,822.0 900.0,822.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="822.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,839.0 900.0,839.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="839.0" r="4.5" fill="#24292f"/>
+<polyline points="700.0,856.0 900.0,856.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="700.0" cy="856.0" r="4.5" fill="#d1242f"/>
+<polyline points="760.0,873.0 900.0,873.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="873.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,890.0 900.0,890.0" fill="none" stroke="#8250df" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="804.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#1f6fb2" stroke-width="2.2"/>
+<circle cx="900.0" cy="822.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="826.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="839.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="843.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="856.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="860.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="873.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="877.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="890.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="894.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="828.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f6fb2">Mic 6 · S_R</text>
+<text x="1136.0" y="828.0" font-size="12" font-weight="bold" text-anchor="end" fill="#1f6fb2">Tier B</text>
+<text x="950.0" y="850.0" font-size="13" font-weight="bold" text-anchor="start" fill="#d1242f">RIGHT slot · SEL → 3V3</text>
+<text x="950.0" y="870.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">top of right shoulder</text>
+<text x="950.0" y="890.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="470.0,645.0 580.0,645.0 580.0,1089.0 840.0,1089.0" fill="none" stroke="#e16f24" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="840.0,1030.0 840.0,1148.0" fill="none" stroke="#e16f24" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="840.0" cy="1089.0" r="4.5" fill="#e16f24"/>
+<polyline points="700.0,962.0 900.0,962.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="962.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,979.0 900.0,979.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="979.0" r="4.5" fill="#24292f"/>
+<polyline points="730.0,996.0 900.0,996.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="730.0" cy="996.0" r="4.5" fill="#24292f"/>
+<polyline points="760.0,1013.0 900.0,1013.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="1013.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,1030.0 900.0,1030.0" fill="none" stroke="#e16f24" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="944.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#c8102e" stroke-width="2.2"/>
+<circle cx="900.0" cy="962.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="966.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="979.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="983.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="996.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1000.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="1013.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1017.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="1030.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1034.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="968.0" font-size="15" font-weight="bold" text-anchor="start" fill="#c8102e">Mic 7 · B4</text>
+<text x="1136.0" y="968.0" font-size="12" font-weight="bold" text-anchor="end" fill="#c8102e">Tier A</text>
+<text x="950.0" y="990.0" font-size="13" font-weight="bold" text-anchor="start" fill="#24292f">LEFT slot · SEL → GND</text>
+<text x="950.0" y="1010.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">back, 15 cm left of spine</text>
+<text x="950.0" y="1030.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<polyline points="700.0,1080.0 900.0,1080.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="700.0" cy="1080.0" r="4.5" fill="#d1242f"/>
+<polyline points="730.0,1097.0 900.0,1097.0" fill="none" stroke="#24292f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="730.0" cy="1097.0" r="4.5" fill="#24292f"/>
+<polyline points="700.0,1114.0 900.0,1114.0" fill="none" stroke="#d1242f" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<circle cx="700.0" cy="1114.0" r="4.5" fill="#d1242f"/>
+<polyline points="760.0,1131.0 900.0,1131.0" fill="none" stroke="#bf8700" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="760.0" cy="1131.0" r="4.5" fill="#bf8700"/>
+<polyline points="840.0,1148.0 900.0,1148.0" fill="none" stroke="#e16f24" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="900.0" y="1062.0" width="245.0" height="104.0" rx="8" fill="white" stroke="#1f6fb2" stroke-width="2.2"/>
+<circle cx="900.0" cy="1080.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1084.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">3V</text>
+<circle cx="900.0" cy="1097.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1101.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">GND</text>
+<circle cx="900.0" cy="1114.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1118.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">SEL</text>
+<circle cx="900.0" cy="1131.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1135.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">CLK</text>
+<circle cx="900.0" cy="1148.0" r="4" fill="#d4a72c" stroke="#6e5000" stroke-width="1"/>
+<text x="909.0" y="1152.0" font-size="10" font-weight="normal" text-anchor="start" fill="#57606a" font-family="Menlo" xml:space="preserve">DAT</text>
+<text x="950.0" y="1086.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f6fb2">Mic 8 · S_L</text>
+<text x="1136.0" y="1086.0" font-size="12" font-weight="bold" text-anchor="end" fill="#1f6fb2">Tier B</text>
+<text x="950.0" y="1108.0" font-size="13" font-weight="bold" text-anchor="start" fill="#d1242f">RIGHT slot · SEL → 3V3</text>
+<text x="950.0" y="1128.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">top of left shoulder</text>
+<text x="950.0" y="1148.0" font-size="11" font-weight="normal" text-anchor="start" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+<rect x="1222.0" y="110.0" width="450.0" height="640.0" rx="8" fill="#fbfcfd" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="1242.0" y="140.0" font-size="18" font-weight="bold" text-anchor="start" fill="#1f2328">Before you power on</text>
+<text x="1242.0" y="170.0" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">Power</text>
+<text x="1330.0" y="170.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">Mics run from 3V3 only, never 5 V. All 8</text>
+<text x="1330.0" y="188.2" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">together draw about 5 mA.</text>
+<text x="1242.0" y="216.4" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">SEL</text>
+<text x="1330.0" y="216.4" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">Never leave it floating. LEFT mic → GND, RIGHT</text>
+<text x="1330.0" y="234.6" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">mic → 3V3. The two mics on a line take turns</text>
+<text x="1330.0" y="252.8" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">on the wire (one on the rising clock edge, one</text>
+<text x="1330.0" y="271.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">on the falling edge).</text>
+<text x="1242.0" y="299.2" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">Clock</text>
+<text x="1330.0" y="299.2" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">One pin (D0) drives all 8 mics. Put the 33–100</text>
+<text x="1330.0" y="317.4" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">Ω resistor right at D0. Keep each clock run</text>
+<text x="1330.0" y="335.6" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">under ~30 cm and run a GND wire right next to</text>
+<text x="1330.0" y="353.8" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">it. If the scope shows ringing, add a small</text>
+<text x="1330.0" y="372.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">buffer chip (e.g. 74LVC125).</text>
+<text x="1242.0" y="400.2" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">Rate</text>
+<text x="1330.0" y="400.2" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">16 kHz × 128 = 2.048 MHz clock, inside the</text>
+<text x="1330.0" y="418.4" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">mic&#x27;s 1–3.25 MHz range.</text>
+<text x="1242.0" y="446.6" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">Tiers</text>
+<text x="1330.0" y="446.6" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">Tier A = the 4 LEFT mics (one per line). Tier</text>
+<text x="1330.0" y="464.8" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">B = add the 4 RIGHT mics. No rewiring between</text>
+<text x="1330.0" y="483.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">tiers.</text>
+<text x="1242.0" y="511.2" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">Bring-up</text>
+<text x="1330.0" y="511.2" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">Wire and test one mic at a time: Mic 1 alone,</text>
+<text x="1330.0" y="529.4" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">then its partner, then the next line. Label</text>
+<text x="1330.0" y="547.6" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">each board, e.g. &quot;L0-LEFT&quot;.</text>
+<text x="1242.0" y="575.8" font-size="13" font-weight="bold" text-anchor="start" fill="#0969da">Keep free</text>
+<text x="1330.0" y="575.8" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">D8–D10 (microSD). D2, D6, D7 stay spare for a</text>
+<text x="1330.0" y="594.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">record button or a UART link.</text>
+<rect x="1222.0" y="770.0" width="450.0" height="380.0" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="1242.0" y="798.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f2328">ESP-IDF setup (I2S0, PDM RX, 4 lines)</text>
+<text x="1242.0" y="826.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">i2s_pdm_rx_config_t cfg = {</text>
+<text x="1242.0" y="845.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">  .clk_cfg  = I2S_PDM_RX_CLK_DEFAULT_CONFIG(16000),</text>
+<text x="1242.0" y="864.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">  .slot_cfg = I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG(</text>
+<text x="1242.0" y="883.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">      I2S_DATA_BIT_WIDTH_16BIT,</text>
+<text x="1242.0" y="902.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">      I2S_SLOT_MODE_STEREO),</text>
+<text x="1242.0" y="921.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">  .gpio_cfg = {</text>
+<text x="1242.0" y="940.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">    .clk  = GPIO_NUM_1,            // D0</text>
+<text x="1242.0" y="959.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">    .dins = { GPIO_NUM_2,          // D1 line 0</text>
+<text x="1242.0" y="978.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">              GPIO_NUM_4,          // D3 line 1</text>
+<text x="1242.0" y="997.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">              GPIO_NUM_5,          // D4 line 2</text>
+<text x="1242.0" y="1016.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">              GPIO_NUM_6 } },      // D5 line 3</text>
+<text x="1242.0" y="1035.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">};</text>
+<text x="1242.0" y="1054.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">cfg.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;</text>
+<text x="1242.0" y="1073.0" font-size="11.5" font-weight="normal" text-anchor="start" fill="#24292f" font-family="Menlo" xml:space="preserve">cfg.slot_cfg.slot_mask = I2S_PDM_LINE_SLOT_ALL;</text>
+<text x="1242.0" y="1104.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">Tap each mic to confirm the channel order in the buffer. If</text>
+<text x="1242.0" y="1120.8" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">hardware PCM conversion misbehaves with 4 lines, switch to RAW</text>
+<text x="1242.0" y="1137.6" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">format and decimate in software (like our pdm_decimator.c).</text>
+<rect x="60.0" y="975.0" width="500.0" height="175.0" rx="8" fill="#fbfcfd" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="80.0" y="1002.0" font-size="15" font-weight="bold" text-anchor="start" fill="#1f2328">Legend</text>
+<polyline points="84.0,1024.0 124.0,1024.0" fill="none" stroke="#d1242f" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="136.0" y="1028.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">3V3 power</text>
+<polyline points="84.0,1050.0 124.0,1050.0" fill="none" stroke="#24292f" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="136.0" y="1054.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">GND</text>
+<polyline points="84.0,1076.0 124.0,1076.0" fill="none" stroke="#bf8700" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="136.0" y="1080.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">PDM clock (shared by all 8)</text>
+<polyline points="84.0,1102.0 124.0,1102.0" fill="none" stroke="#57606a" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<text x="136.0" y="1106.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">SEL tie (dashed)</text>
+<polyline points="330.0,1024.0 370.0,1024.0" fill="none" stroke="#0969da" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="382.0" y="1028.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">DATA line 0</text>
+<polyline points="330.0,1050.0 370.0,1050.0" fill="none" stroke="#1a7f37" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="382.0" y="1054.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">DATA line 1</text>
+<polyline points="330.0,1076.0 370.0,1076.0" fill="none" stroke="#8250df" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="382.0" y="1080.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">DATA line 2</text>
+<polyline points="330.0,1102.0 370.0,1102.0" fill="none" stroke="#e16f24" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="382.0" y="1106.0" font-size="13" font-weight="normal" text-anchor="start" fill="#1f2328">DATA line 3</text>
+<text x="84.0" y="1138.0" font-size="12" font-weight="normal" text-anchor="start" fill="#57606a">Red box = Tier A mic   ·   Blue box = Tier B mic (positions from shirt-mic-layout.png)</text>
+</svg>

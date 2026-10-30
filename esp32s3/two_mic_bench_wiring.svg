@@ -1,0 +1,173 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="820" viewBox="0 0 1560 820" font-family="Helvetica, Arial, sans-serif">
+<rect width="1560" height="820" fill="white"/>
+<text x="780" y="46" font-size="28" font-weight="bold" text-anchor="middle" fill="#1f2328">XIAO ESP32-S3 Sense &#8594; 2 PDM mics: bench wiring (two_mic_stream)</text>
+<text x="780" y="74" font-size="15" text-anchor="middle" fill="#57606a">Both mics share the clock wire and the data wire. The SEL pin decides which channel each mic shows up on.</text>
+<text x="780" y="95" font-size="14" text-anchor="middle" fill="#57606a">Dot = connected. Wires that cross without a dot are not connected.</text>
+
+<!-- board -->
+<rect x="270" y="165" width="60" height="24" rx="4" fill="#d0d7de" stroke="#8c959f" stroke-width="1.5"/>
+<text x="300" y="158" font-size="12" font-weight="bold" text-anchor="middle" fill="#57606a">USB-C</text>
+<rect x="150" y="185" width="300" height="420" rx="16" fill="#1f2328"/>
+
+<circle cx="150" cy="225" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="230" font-size="14" font-weight="bold" fill="#ffffff">5V</text>
+<text x="218" y="230" font-size="12" fill="#8c959f">not used</text>
+<circle cx="150" cy="277" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="282" font-size="14" font-weight="bold" fill="#ffffff">GND</text>
+<text x="218" y="282" font-size="12" fill="#ffffff">GND &#8594; both mics</text>
+<circle cx="150" cy="329" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="334" font-size="14" font-weight="bold" fill="#ffffff">3V3</text>
+<text x="218" y="334" font-size="12" fill="#ff8182">3V3 &#8594; both mics</text>
+<circle cx="150" cy="381" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="386" font-size="14" font-weight="bold" fill="#ffffff">D10</text>
+<circle cx="150" cy="433" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="438" font-size="14" font-weight="bold" fill="#ffffff">D9</text>
+<circle cx="150" cy="485" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="490" font-size="14" font-weight="bold" fill="#ffffff">D8</text>
+<circle cx="150" cy="537" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="168" y="542" font-size="14" font-weight="bold" fill="#ffffff">D7</text>
+
+<circle cx="450" cy="225" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="223" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D0</text>
+<text x="432" y="238" font-size="10" text-anchor="end" fill="#8c959f">GPIO1</text>
+<text x="390" y="229" font-size="12" font-weight="bold" text-anchor="end" fill="#80ccff">PDM DATA</text>
+<circle cx="450" cy="277" r="9" fill="#d4a72c" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="275" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D1</text>
+<text x="432" y="290" font-size="10" text-anchor="end" fill="#8c959f">GPIO2</text>
+<text x="390" y="281" font-size="12" font-weight="bold" text-anchor="end" fill="#eac54f">PDM CLK</text>
+<circle cx="450" cy="329" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="334" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D2</text>
+<circle cx="450" cy="381" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="386" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D3</text>
+<circle cx="450" cy="433" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="438" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D4</text>
+<circle cx="450" cy="485" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="490" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D5</text>
+<circle cx="450" cy="537" r="9" fill="#6e7781" stroke="#1f2328" stroke-width="2"/>
+<text x="432" y="542" font-size="14" font-weight="bold" text-anchor="end" fill="#ffffff">D6</text>
+
+<text x="300" y="632" font-size="18" font-weight="bold" text-anchor="middle" fill="#1f2328">XIAO ESP32-S3 Sense</text>
+<text x="300" y="652" font-size="12" text-anchor="middle" fill="#57606a">pins seen from the underside &#183; grey pins unused</text>
+
+<!-- buses -->
+<g fill="none" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
+  <polyline points="150,329 90,329 90,115 600,115 600,486" stroke="#d1242f"/>
+  <polyline points="150,277 110,277 110,135 630,135 630,464" stroke="#24292f"/>
+  <polyline points="450,277 660,277" stroke="#bf8700"/>
+  <polyline points="660,258 660,508" stroke="#bf8700"/>
+  <polyline points="450,225 720,225 720,530" stroke="#0969da"/>
+</g>
+<text x="594" y="108" font-size="13" font-weight="bold" text-anchor="end" fill="#d1242f">3V3</text>
+<text x="636" y="128" font-size="13" font-weight="bold" fill="#24292f">GND</text>
+<text x="666" y="365" font-size="13" font-weight="bold" fill="#bf8700">CLK</text>
+<text x="726" y="365" font-size="13" font-weight="bold" fill="#0969da">DAT</text>
+<circle cx="660" cy="277" r="4.5" fill="#bf8700"/>
+
+<!-- Mic A stubs -->
+<g fill="none" stroke-width="2" stroke-linecap="round">
+  <line x1="600" y1="192" x2="820" y2="192" stroke="#d1242f"/>
+  <line x1="630" y1="214" x2="820" y2="214" stroke="#24292f"/>
+  <line x1="630" y1="236" x2="820" y2="236" stroke="#24292f" stroke-dasharray="6 4"/>
+  <line x1="660" y1="258" x2="820" y2="258" stroke="#bf8700"/>
+  <line x1="720" y1="280" x2="820" y2="280" stroke="#0969da"/>
+</g>
+<circle cx="600" cy="192" r="4.5" fill="#d1242f"/>
+<circle cx="630" cy="214" r="4.5" fill="#24292f"/>
+<circle cx="630" cy="236" r="4.5" fill="#24292f"/>
+<circle cx="660" cy="258" r="4.5" fill="#bf8700"/>
+<circle cx="720" cy="280" r="4.5" fill="#0969da"/>
+
+<rect x="820" y="170" width="300" height="130" rx="8" fill="white" stroke="#1a7f37" stroke-width="2.2"/>
+<g font-family="Menlo, monospace" font-size="10" fill="#57606a">
+  <circle cx="820" cy="192" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="196">3V</text>
+  <circle cx="820" cy="214" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="218">GND</text>
+  <circle cx="820" cy="236" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="240">SEL</text>
+  <circle cx="820" cy="258" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="262">CLK</text>
+  <circle cx="820" cy="280" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="284">DAT</text>
+</g>
+<text x="875" y="198" font-size="16" font-weight="bold" fill="#1a7f37">Mic A &#8594; ch0</text>
+<text x="875" y="222" font-size="13" font-weight="bold" fill="#24292f">LEFT slot &#183; SEL &#8594; GND</text>
+<text x="875" y="244" font-size="12" fill="#57606a">tap it: ch0 should jump</text>
+<text x="875" y="266" font-size="11" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+
+<!-- Mic B stubs -->
+<g fill="none" stroke-width="2" stroke-linecap="round">
+  <line x1="600" y1="442" x2="820" y2="442" stroke="#d1242f"/>
+  <line x1="630" y1="464" x2="820" y2="464" stroke="#24292f"/>
+  <line x1="600" y1="486" x2="820" y2="486" stroke="#d1242f" stroke-dasharray="6 4"/>
+  <line x1="660" y1="508" x2="820" y2="508" stroke="#bf8700"/>
+  <line x1="720" y1="530" x2="820" y2="530" stroke="#0969da"/>
+</g>
+<circle cx="600" cy="442" r="4.5" fill="#d1242f"/>
+<circle cx="630" cy="464" r="4.5" fill="#24292f"/>
+<circle cx="600" cy="486" r="4.5" fill="#d1242f"/>
+<circle cx="660" cy="508" r="4.5" fill="#bf8700"/>
+<circle cx="720" cy="530" r="4.5" fill="#0969da"/>
+
+<rect x="820" y="420" width="300" height="130" rx="8" fill="white" stroke="#8250df" stroke-width="2.2"/>
+<g font-family="Menlo, monospace" font-size="10" fill="#57606a">
+  <circle cx="820" cy="442" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="446">3V</text>
+  <circle cx="820" cy="464" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="468">GND</text>
+  <circle cx="820" cy="486" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="490">SEL</text>
+  <circle cx="820" cy="508" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="512">CLK</text>
+  <circle cx="820" cy="530" r="4" fill="#d4a72c" stroke="#6e5000"/><text x="829" y="534">DAT</text>
+</g>
+<text x="875" y="448" font-size="16" font-weight="bold" fill="#8250df">Mic B &#8594; ch1</text>
+<text x="875" y="472" font-size="13" font-weight="bold" fill="#d1242f">RIGHT slot &#183; SEL &#8594; 3V3</text>
+<text x="875" y="494" font-size="12" fill="#57606a">tap it: ch1 should jump</text>
+<text x="875" y="516" font-size="11" fill="#8c959f">Adafruit #3492 (MP34DT01-M)</text>
+
+<!-- right panels -->
+<rect x="1160" y="110" width="370" height="250" rx="8" fill="#fbfcfd" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="1180" y="140" font-size="18" font-weight="bold" fill="#1f2328">Before you power on</text>
+<g font-size="13" fill="#1f2328">
+  <text x="1180" y="168">&#8226; Mics run on 3V3 only, never 5V.</text>
+  <text x="1180" y="190">&#8226; Check 3V and GND on each mic before</text>
+  <text x="1180" y="208">   plugging in USB. Reversed power can kill a mic.</text>
+  <text x="1180" y="230">&#8226; SEL goes to GND or 3V3, never left floating.</text>
+  <text x="1180" y="252">&#8226; Keep the clock wire short (under ~30 cm)</text>
+  <text x="1180" y="270">   with a GND wire alongside it.</text>
+  <text x="1180" y="292">&#8226; Optional: 33&#8211;100 &#937; in series at D1 if the</text>
+  <text x="1180" y="310">   clock rings on the scope.</text>
+  <text x="1180" y="332">&#8226; Wire one mic, check it, then add the second.</text>
+</g>
+
+<rect x="1160" y="380" width="370" height="270" rx="8" fill="#fbfcfd" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="1180" y="410" font-size="18" font-weight="bold" fill="#1f2328">Reading the viewer</text>
+<g font-size="13" fill="#1f2328">
+  <text x="1180" y="438">&#8226; Tap Mic A &#8594; ch0 jumps. Tap Mic B &#8594; ch1 jumps.</text>
+  <text x="1180" y="462"><tspan font-weight="bold">One channel flat:</tspan> that mic isn't sending.</text>
+  <text x="1180" y="480">   Check its 3V, GND, CLK and DAT joints, then</text>
+  <text x="1180" y="498">   swap it into the working mic's spot.</text>
+  <text x="1180" y="522"><tspan font-weight="bold">Both flat:</tspan> a shared wire is off</text>
+  <text x="1180" y="540">   (D1 clock, D0 data, 3V3 or GND).</text>
+  <text x="1180" y="564"><tspan font-weight="bold">Sound on the wrong channel:</tspan> SEL is tied</text>
+  <text x="1180" y="582">   to the wrong rail.</text>
+  <text x="1180" y="606"><tspan font-weight="bold">One channel garbled, other flat:</tspan> both</text>
+  <text x="1180" y="624">   SEL pins are on the same rail.</text>
+</g>
+
+<!-- bottom notes -->
+<rect x="60" y="690" width="520" height="105" rx="8" fill="#fff8c5" stroke="#d4a72c" stroke-width="1.5"/>
+<text x="80" y="716" font-size="15" font-weight="bold" fill="#1f2328">Firmware: esp32s3/two_mic_stream</text>
+<text x="80" y="740" font-size="13" fill="#1f2328">CLK = GPIO2 (D1), DAT = GPIO1 (D0). 2.048 MHz clock, 16 kHz per channel.</text>
+<text x="80" y="762" font-size="13" fill="#1f2328">The 8-mic sheet (esp32s3-mic-wiring.png) has CLK and DATA on the</text>
+<text x="80" y="780" font-size="13" fill="#1f2328">opposite pins. Use this sheet for the bench rig.</text>
+
+<rect x="610" y="690" width="510" height="105" rx="8" fill="#fbfcfd" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="630" y="716" font-size="15" font-weight="bold" fill="#1f2328">Legend</text>
+<g stroke-width="3" stroke-linecap="round">
+  <line x1="634" y1="740" x2="674" y2="740" stroke="#d1242f"/>
+  <line x1="634" y1="766" x2="674" y2="766" stroke="#24292f"/>
+  <line x1="820" y1="740" x2="860" y2="740" stroke="#bf8700"/>
+  <line x1="820" y1="766" x2="860" y2="766" stroke="#0969da"/>
+  <line x1="980" y1="740" x2="1020" y2="740" stroke="#57606a" stroke-dasharray="6 4"/>
+</g>
+<g font-size="13" fill="#1f2328">
+  <text x="686" y="744">3V3 power</text>
+  <text x="686" y="770">GND</text>
+  <text x="872" y="744">PDM clock</text>
+  <text x="872" y="770">PDM data</text>
+  <text x="1032" y="744">SEL tie</text>
+</g>
+</svg>

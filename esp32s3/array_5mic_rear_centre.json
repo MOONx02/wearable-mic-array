@@ -1,0 +1,7 @@
+{
+  "0": ["front outer L", 68.6, 22.0],
+  "1": ["front outer R", -68.6, 22.0],
+  "2": ["front inner L", 22.9, 22.0],
+  "3": ["front inner R", -22.9, 22.0],
+  "4": ["rear centre", 0.0, -22.0]
+}

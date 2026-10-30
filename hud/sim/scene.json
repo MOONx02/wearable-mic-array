@@ -1,0 +1,112 @@
+{
+  "simulated": true,
+  "duration_s": 20.036875000000002,
+  "room_m": [
+    10.0,
+    7.0,
+    3.0
+  ],
+  "rt60_s": 0.5,
+  "talker_snr_db": -3.0,
+  "camera": {
+    "hfov_deg": 66.0,
+    "yaw_offset_deg": 0.0
+  },
+  "sources": [
+    {
+      "name": "Samantha",
+      "kind": "talker",
+      "az": 20.0,
+      "dist": 1.5,
+      "height": 1.6,
+      "active": [
+        [
+          0.5,
+          7.655
+        ],
+        [
+          14.446000000000002,
+          19.036875000000002
+        ]
+      ]
+    },
+    {
+      "name": "Daniel",
+      "kind": "talker",
+      "az": -30.0,
+      "dist": 2.0,
+      "height": 1.65,
+      "active": [
+        [
+          7.155,
+          12.946000000000002
+        ]
+      ]
+    },
+    {
+      "name": "Alarm",
+      "kind": "event",
+      "az": 150.0,
+      "dist": 2.5,
+      "height": 2.2,
+      "active": [
+        [
+          13.446000000000002,
+          15.446000000000002
+        ]
+      ]
+    },
+    {
+      "name": "Rack fan 1",
+      "kind": "noise",
+      "az": -100.0,
+      "dist": 2.0,
+      "height": 1.0,
+      "active": [
+        [
+          0.0,
+          20.036875000000002
+        ]
+      ]
+    },
+    {
+      "name": "Rack fan 2",
+      "kind": "noise",
+      "az": 115.0,
+      "dist": 2.2,
+      "height": 1.0,
+      "active": [
+        [
+          0.0,
+          20.036875000000002
+        ]
+      ]
+    },
+    {
+      "name": "Rack fan 3",
+      "kind": "noise",
+      "az": -160.0,
+      "dist": 3.0,
+      "height": 1.0,
+      "active": [
+        [
+          0.0,
+          20.036875000000002
+        ]
+      ]
+    },
+    {
+      "name": "Rack fan 4",
+      "kind": "noise",
+      "az": 70.0,
+      "dist": 3.0,
+      "height": 1.0,
+      "active": [
+        [
+          0.0,
+          20.036875000000002
+        ]
+      ]
+    }
+  ]
+}

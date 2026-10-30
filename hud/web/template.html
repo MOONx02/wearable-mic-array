@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mic-array HUD</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0d1117; color: #e6edf3; font: 15px -apple-system, Helvetica, Arial, sans-serif; }
+  main { max-width: 1920px; margin: 0 auto; padding: 12px 16px 20px; }
+  canvas { display: block; width: 100%; height: auto; border-radius: 10px; cursor: crosshair; background: #0d1117; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+  button, select { font: inherit; color: #e6edf3; background: #21262d; border: 1px solid #30363d; border-radius: 8px;
+                   padding: 7px 14px; cursor: pointer; }
+  button:hover, select:hover { border-color: #58a6ff; }
+  button.on { background: #1f6feb; border-color: #58a6ff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .group { display: inline-flex; gap: 0; }
+  .group button { border-radius: 0; }
+  .group button:first-child { border-radius: 8px 0 0 8px; }
+  .group button:last-child { border-radius: 0 8px 8px 0; margin-left: -1px; }
+  input[type=range] { flex: 1; min-width: 200px; accent-color: #58a6ff; }
+  #time { font-family: Menlo, monospace; min-width: 120px; text-align: right; }
+  .hint { color: #8b949e; margin-top: 10px; line-height: 1.5; }
+  kbd { font-family: Menlo, monospace; background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 0 5px; }
+  #cam { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="hud" width="1920" height="1080"></canvas>
+  <div class="bar">
+    <button id="play" disabled>Loading…</button>
+    <span class="group"><button id="listenBeam" class="on">Listen: beam</button><button id="listenMic">one mic</button></span>
+    <button id="auto">Auto-follow</button>
+    <label>Beam <select id="kind"><option value="mvdr">Adaptive (MVDR)</option><option value="das">Delay-and-sum</option></select></label>
+    <input id="slider" type="range" min="0" value="0" step="1">
+    <span id="time">0.0 s</span>
+  </div>
+  <div class="hint">
+    Click a person in the camera view, or a direction on the radar, to steer the beam there.
+    Switch between <b>Listen: beam</b> and <b>one mic</b> to hear the difference.
+    Keys: <kbd>space</kbd> play/pause, <kbd>←</kbd>/<kbd>→</kbd> step 0.1 s (<kbd>shift</kbd> = 1 s), <kbd>A</kbd> auto-follow, <kbd>M</kbd> beam/one mic.
+  </div>
+  <!--__VIDEO__-->
+</main>
+<script>window.HUD_DATA = /*__DATA__*/null;</script>
+<script>
+/*__DSP__*/
+</script>
+<script>
+/*__HUD__*/
+</script>
+</body>
+</html>
