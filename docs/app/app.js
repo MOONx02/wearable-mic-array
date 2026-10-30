@@ -390,6 +390,8 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
+const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
+
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
   constructor() { this.name = "USB"; }
   async open() {
@@ -443,17 +445,21 @@ class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
     while (!this.closed) {
       onState("streaming");
       const ep = this.data.inEp, q = [];
+      // Android Chrome services reads one after another with a fixed cost each, so the link only keeps up
+      // when each read is big: grow the read size while reads keep coming back full
+      this.size = this.size || 65536;
+      const read = () => { const p = this.dev.transferIn(ep, this.size); p.catch(() => {}); return p; };
       try {
-        // Each read can come back with only a packet or two, and every read is a round trip through the
-        // browser, so keep many queued: the board is only polled while a read is waiting (the kernel serial
-        // driver on a Pi or laptop does this itself)
-        for (let i = 0; i < 64; i++) q.push(this.dev.transferIn(ep, 16384));
+        for (let i = 0; i < 16; i++) q.push(read());
+        let full = 0;
         for (;;) {
           const r = await q.shift();
           if (this.closed) return;
-          q.push(this.dev.transferIn(ep, 16384));
+          q.push(read());
           usbReads++;
           if (r.status === "ok" && r.data && r.data.byteLength) {
+            full = r.data.byteLength >= this.size ? full + 1 : 0;
+            if (full >= 8 && this.size < MAX_USB_READ) { this.size *= 2; full = 0; }
             onData(new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength));
           } else if (r.status === "stall") {
             await this.dev.clearHalt("in", ep);
@@ -461,6 +467,10 @@ class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
         }
       } catch (e) {
         if (this.closed) return;
+        if (this.dev.opened && this.size > 16384) {  // this device won't take reads that big
+          this.size = 16384;
+          continue;
+        }
         onState("reconnecting…");
         if (!(await this.reopen())) return;
       }
@@ -666,7 +676,7 @@ function wavToFloat(buf) {
 
 const model = new Model();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
-let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0;
+let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null;
 const pktTimes = [], frameTimes = [], rxTimes = [];
 const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
 
@@ -682,7 +692,9 @@ const parser = new Parser({
   jpeg(bytes) {
     const now = performance.now();
     rxTimes.push(now);
-    if (decoding && now - decoding < 1000) return;  // a decode that never finishes mustn't freeze the picture
+    // frames can arrive several at once; keep the newest and show it when the current decode is done
+    if (decoding && now - decoding < 1000) { pendingJpeg = bytes; return; }  // a hung decode mustn't freeze it
+    pendingJpeg = null;
     const mine = decoding = now;
     const blob = new Blob([bytes], { type: "image/jpeg" });
     createImageBitmap(blob)
@@ -694,7 +706,11 @@ const parser = new Parser({
       })
       .then((bm) => { image?.close?.(); image = bm; frameTimes.push(performance.now()); })
       .catch(() => { decodeFails++; })
-      .finally(() => { if (decoding === mine) decoding = 0; });
+      .finally(() => {
+        if (decoding !== mine) return;
+        decoding = 0;
+        if (pendingJpeg) { rxTimes.pop(); parser.on.jpeg(pendingJpeg); }
+      });
   },
   status(msg) {
     if (msg.startsWith("stats: ")) boardStats = msg.slice(7);
@@ -1680,7 +1696,7 @@ setInterval(() => {
     const bs = /([\d.]+) camera fps, (\d+) frames skipped, (\d+) mic packets dropped/.exec(boardStats);
     s += ` (got ${rx.toFixed(0)}, board sent ${bs ? `${(+bs[1]).toFixed(0)}, skipped ${bs[2]}, mic drops ${bs[3]}` : "?"})`;
     if (decodeErrors || decodeFails) s += ` · bad JPEG ${decodeErrors}/${decodeFails}`;
-    s += ` · USB ${kbs.toFixed(0)} kB/s${perRead ? ` (${perRead.toFixed(0)} B/read)` : ""} · load ${load.toFixed(0)}%`;
+    s += ` · USB ${kbs.toFixed(0)} kB/s${perRead ? ` (${(perRead / 1024).toFixed(0)}/${((conn.size || 0) / 1024).toFixed(0)} KB per read)` : ""} · load ${load.toFixed(0)}%`;
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
   }
