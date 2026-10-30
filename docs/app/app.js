@@ -663,7 +663,7 @@ function wavToFloat(buf) {
 
 const model = new Model();
 let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
-let image = null, decoding = false, lastSeq = null, gaps = 0;
+let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0;
 const pktTimes = [], frameTimes = [], rxTimes = [];
 const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
 
@@ -677,13 +677,21 @@ const parser = new Parser({
   },
   wrong() { wrongFirmware = true; },
   jpeg(bytes) {
-    rxTimes.push(performance.now());
-    if (decoding) return;
-    decoding = true;
-    createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
+    const now = performance.now();
+    rxTimes.push(now);
+    if (decoding && now - decoding < 1000) return;  // a decode that never finishes mustn't freeze the picture
+    const mine = decoding = now;
+    const blob = new Blob([bytes], { type: "image/jpeg" });
+    createImageBitmap(blob)
+      .catch(() => {  // some JPEGs the bitmap decoder rejects still decode as an <img>
+        decodeErrors++;
+        const img = new Image(), url = URL.createObjectURL(blob);
+        img.src = url;
+        return img.decode().then(() => img).finally(() => URL.revokeObjectURL(url));
+      })
       .then((bm) => { image?.close?.(); image = bm; frameTimes.push(performance.now()); })
-      .catch(() => {})
-      .finally(() => { decoding = false; });
+      .catch(() => { decodeFails++; })
+      .finally(() => { if (decoding === mine) decoding = 0; });
   },
   status(msg) {
     if (msg.startsWith("stats: ")) boardStats = msg.slice(7);
@@ -1656,16 +1664,18 @@ function rate(times, now) {
 let busyAt = performance.now();
 setInterval(() => {
   const now = performance.now(), pk = rate(pktTimes, now), fps = rate(frameTimes, now), rx = rate(rxTimes, now);
-  const load = (100 * busy.ms) / (now - busyAt);
+  const load = (100 * busy.ms) / (now - busyAt), kbs = usbBytes / (now - busyAt);
   busy.ms = 0;
+  usbBytes = 0;
   busyAt = now;
   let s = conn ? `${conn.name} · ${connState}` : "not connected";
   if (conn && (connState === "streaming" || conn instanceof DemoConn)) {
     s += ` · ${(pk * 128 / 1000).toFixed(1)} k samples/s · camera ${fps.toFixed(0)} fps`;
     // shown here vs arrived over USB vs what the board says it sent: tells where frames get lost
-    const bs = /([\d.]+) camera fps, (\d+) frames skipped/.exec(boardStats);
-    if (rx > fps + 1.5 || bs) s += ` (got ${rx.toFixed(0)}${bs ? `, board sent ${(+bs[1]).toFixed(0)}, skipped ${bs[2]}` : ""})`;
-    s += ` · load ${load.toFixed(0)}%`;
+    const bs = /([\d.]+) camera fps, (\d+) frames skipped, (\d+) mic packets dropped/.exec(boardStats);
+    s += ` (got ${rx.toFixed(0)}, board sent ${bs ? `${(+bs[1]).toFixed(0)}, skipped ${bs[2]}, mic drops ${bs[3]}` : "?"})`;
+    if (decodeErrors || decodeFails) s += ` · bad JPEG ${decodeErrors}/${decodeFails}`;
+    s += ` · USB ${kbs.toFixed(0)} kB/s · load ${load.toFixed(0)}%`;
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
   }
@@ -1780,6 +1790,7 @@ async function connect(c) {
   focus = null;
   await c.run((data) => {
     const t0 = performance.now();
+    usbBytes += data.length;
     parser.feed(data);
     busy.ms += performance.now() - t0;
   }, (s) => { connState = s; });
