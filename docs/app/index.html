@@ -25,7 +25,12 @@
   button:disabled { opacity: 0.45; }
   #more { display: none; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 8px 4px; color: #8b949e; }
   #more.open { display: flex; }
-  #more input[type=number] { width: 56px; background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+  #calbar { display: none; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 8px 4px; color: #8b949e;
+    border-top: 1px solid #30363d; }
+  #calbar.open { display: flex; }
+  #calbar b { color: #56d4dd; }
+  #calinfo { color: #e6edf3; }
+  #calbar input[type=number], #more input[type=number] { width: 56px; background: #21262d; color: #e6edf3; border: 1px solid #30363d;
     border-radius: 6px; padding: 6px; font: inherit; }
   #status { display: flex; gap: 12px; color: #8b949e; font-size: 12px; padding: 0 10px 4px; white-space: nowrap; }
   #status span { overflow: hidden; text-overflow: ellipsis; }
@@ -52,8 +57,7 @@
     <option value="alarm">Where's the alarm</option>
     <option value="evac">Evacuate</option>
   </select>
-  <button id="centre" title="Clap straight in front of the camera, then press this">Set centre</button>
-  <button id="edge" title="Clap at the right edge of the picture, then press this">Right edge</button>
+  <button id="calib" title="Line the sound marks up with the picture: a phone plays a chirp from spots you put it on">Calibrate</button>
   <button id="swaplr">Swap L/R</button>
   <button id="swapfb">Swap F/B</button>
   <span class="grow"></span>
@@ -67,11 +71,27 @@
   <button id="rotate">Rotate 0°</button>
   <button id="mirror">Mirror</button>
   <label>View <input id="fov" type="number" min="20" max="140" step="1">°</label>
+  <button id="centre" title="Quick: clap straight in front of the camera, then press this">Set centre</button>
+  <button id="edge" title="Quick: clap at the right edge of the picture, then press this">Right edge</button>
   <label>Trigger <input id="thr" type="range" min="4" max="30" step="1"> <span id="thrv"></span></label>
   <button id="rec" class="rec" title="Record to the board's microSD card">● Rec SD</button>
   <a class="btn" href="update.html" title="Flash new firmware onto the board over USB">Update firmware</a>
 </div>
-<div id="status"><span id="hint">Clap ahead → Set centre · clap at the right edge → Right edge</span><span id="conn">not connected</span></div>
+<div id="calbar">
+  <b>Calibrate</b>
+  <label>Spot <select id="caltarget"></select></label>
+  <label>Phone is <select id="caldist"><option value="0.5">0.5 m</option><option value="1">1 m</option>
+    <option value="1.5">1.5 m</option><option value="2">2 m</option><option value="3">3 m</option>
+    <option value="4">4 m</option></select> away</label>
+  <button id="calgrab" class="on" title="Takes the last 3 s of the phone's chirps">Capture</button>
+  <button id="calundo">Undo</button>
+  <button id="calclear">Clear all</button>
+  <button id="calfine" title="Also correct what's left near each captured spot">Fine-tune</button>
+  <label title="Distance used for talkers when the camera is off-centre on the vest">Talkers at <input id="usualdist" type="number" min="0.3" max="10" step="0.5"> m</label>
+  <span id="calinfo"></span>
+  <button id="caldone">Done</button>
+</div>
+<div id="status"><span id="hint">Calibrate: put a phone playing the calibration chirp on spots in the picture</span><span id="conn">not connected</span></div>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div id="connect">

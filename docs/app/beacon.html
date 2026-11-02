@@ -46,6 +46,8 @@ const ROLES = {
     about: "Put this phone at an exit or on a safe route. Tablets in Find → Evacuate steer people toward it." },
   danger: { name: "Danger", shape: [[0, LO], [0.5, HI], [1, LO]], period: 0.3, color: "#f85149",
     about: "Put this phone where it isn't safe (a hot room, a blocked hall). Tablets in Find → Evacuate warn people away from it." },
+  calib: { name: "Calibrate", shape: [[0, HI], [0.5, LO], [1, HI]], period: 0.4, color: "#56d4dd",
+    about: "For the tablet's Calibrate: put this phone's speaker (usually its bottom edge) on the cyan cross in the camera picture, facing the wearer." },
 };
 let role = new URLSearchParams(location.search).get("role");
 if (!ROLES[role]) role = "leader";

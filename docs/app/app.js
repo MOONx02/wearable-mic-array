@@ -33,7 +33,8 @@ const PRESETS = {
 };
 
 const S = Object.assign({ layout: "vest6", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
-                          mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow" },
+                          mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow",
+                          roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
 if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
@@ -173,7 +174,7 @@ class Model {
       }
       this.dead[c] = hi - lo < DEAD_PTP || same > STUCK_FRACTION * h.length;
     }
-    if (!S.find) this.direction(thr, voice);  // in Find mode only the beacon is shown
+    if (!S.find && !cal.on) this.direction(thr, voice);  // in Find mode and calibration only chirps are shown
   }
 
   // Channel that carries the mic at geometry slot ch: itself, or its data-line partner when the mic is
@@ -360,6 +361,7 @@ const CODES = {
   leader: { name: "Leader", shape: [[0, CHIRP_LO], [1, CHIRP_HI]], period: 0.5, color: FOX },
   exit: { name: "Exit", shape: [[0, CHIRP_HI], [1, CHIRP_LO]], period: 0.5, color: FOX },
   danger: { name: "Danger", shape: [[0, CHIRP_LO], [0.5, CHIRP_HI], [1, CHIRP_LO]], period: 0.3, color: DANGER },
+  calib: { name: "Calibration", shape: [[0, CHIRP_HI], [0.5, CHIRP_LO], [1, CHIRP_HI]], period: 0.4, color: "#56d4dd" },
 };
 const KINDS = { ...CODES, alarm: { name: "Alarm", color: ALARM_COL } };
 const FIND_MODES = {
@@ -678,15 +680,40 @@ class Alarm {
 class Parser {
   constructor(on) {
     this.on = on;
-    this.buf = new Uint8Array(0);
     this.td = new TextDecoder();
+    this.reset();
+  }
+  reset() {
+    this.buf = new Uint8Array(0);
+    this.esc = false;       // between the board's "escape: on" and "escape: off": FE 00 = 0xFE, FE 01 = 0xFF
+    this.escHalf = false;   // the last read ended inside an FE pair
+  }
+  unescape(c) {
+    if (!this.escHalf && c.indexOf(0xfe) < 0) return c;
+    const out = new Uint8Array(c.length);
+    let o = 0, i = 0;
+    if (this.escHalf && c.length) { out[o++] = 0xfe + c[0]; i = 1; this.escHalf = false; }
+    for (; i < c.length; i++) {
+      if (c[i] !== 0xfe) out[o++] = c[i];
+      else if (i + 1 < c.length) out[o++] = 0xfe + c[++i];
+      else this.escHalf = true;
+    }
+    return out.subarray(0, o);
+  }
+  escape(c) {  // back to the bytes as they came, for the part of a read after "escape: off"
+    const out = [];
+    for (const v of c) { if (v >= 0xfe) out.push(0xfe, v - 0xfe); else out.push(v); }
+    if (this.escHalf) out.push(0xfe);
+    this.escHalf = false;
+    return new Uint8Array(out);
   }
   feed(chunk) {
-    let b = chunk;
+    const c = this.esc ? this.unescape(chunk) : chunk;
+    let b = c;
     if (this.buf.length) {
-      b = new Uint8Array(this.buf.length + chunk.length);
+      b = new Uint8Array(this.buf.length + c.length);
       b.set(this.buf);
-      b.set(chunk, this.buf.length);
+      b.set(c, this.buf.length);
     }
     const n = b.length, dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
     let p = 0;
@@ -731,8 +758,19 @@ class Parser {
         const len = dv.getUint16(p + 4, true);
         if (len > 512) { p += 2; continue; }
         if (p + 6 + len > n) break;
-        this.on.status(this.td.decode(b.subarray(p + 6, p + 6 + len)));
+        const msg = this.td.decode(b.subarray(p + 6, p + 6 + len));
         p += 6 + len;
+        if (msg === "escape: on" || msg === "escape: off") {
+          const on = msg === "escape: on";
+          if (on === this.esc) continue;
+          // the rest of this read is in the other form: undo what was done to it and parse it again
+          const rest = this.esc ? this.escape(b.subarray(p)) : b.slice(p);
+          this.esc = on;
+          this.buf = new Uint8Array(0);
+          this.feed(rest);
+          return;
+        }
+        this.on.status(msg);
       } else {
         p += 2;
       }
@@ -802,7 +840,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v16";
+const APP_VERSION = "v18";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -988,6 +1026,10 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
                 finds.push({ sig: spatial(e.sig(), e.ang(t), false, e.level(t), "peak"), pos: 0 });
                 nextAt[e.id] = n + (e.gaps ? e.gaps[k % e.gaps.length] : e.period) * FS;
               }
+            } else if (cal.on && n >= (nextAt.calib ?? 0)) {  // the phone on the calibration spot
+              const [a, e] = demoPhoneDir();
+              finds.push({ sig: spatial(codeChirp("calib"), a, false, 900 / S.calDist, "peak", e), pos: 0 });
+              nextAt.calib = n + CODES.calib.period * FS;
             }
             for (let c = 0; c < CH; c++) {
               let v = -30935;
@@ -1028,6 +1070,18 @@ const DEMO_FIND = {
   alarm: [{ id: "alarm", sig: alarmBeep, gaps: [1, 1, 2], ang: (t) => wrap(70 - t * 4), level: () => 1500 }],
 };
 
+// The demo's made-up camera (aimed a little right and up, rolled, below the mics), which calibration should
+// find, and the phone on the spot calibration asks for.
+const DEMO_CAM = { offset: -6, tilt: 12, roll: 3, hfov: 68, kel: 1, camX: 0, camZ: -40 };
+function demoSpot() {
+  const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), aspect = cal.pic ? cal.pic.h / cal.pic.w : 0.75;
+  return [fx, fy, (fx - 0.5) * 2, (0.5 - fy) * 2 * aspect];
+}
+function demoPhoneDir() {
+  const [, , X, Y] = demoSpot();
+  return camUnproj(X, Y, S.calDist, DEMO_CAM);
+}
+
 function demoPicture(g, t) {
   const sky = g.createLinearGradient(0, 0, 0, 240);
   sky.addColorStop(0, "#2d3b4e");
@@ -1047,6 +1101,18 @@ function demoPicture(g, t) {
   g.fillStyle = "#e6edf3";
   g.font = "14px sans-serif";
   g.fillText(`demo camera  ${t.toFixed(1)} s`, 10, 20);
+  if (cal.on) {
+    const [fx, fy] = demoSpot(), px = fx * 320, py = fy * 240, s = Math.max(0.5, 1.6 / S.calDist);
+    g.fillStyle = "#0b0f14";
+    g.strokeStyle = "#e6edf3";
+    g.lineWidth = 1.5;
+    g.fillRect(px - 7 * s, py - 24 * s, 14 * s, 28 * s);
+    g.strokeRect(px - 7 * s, py - 24 * s, 14 * s, 28 * s);
+    g.fillStyle = "#56d4dd";
+    g.beginPath();
+    g.arc(px, py, 2 * s, 0, 2 * Math.PI);  // the speaker, at the bottom
+    g.fill();
+  }
 }
 
 function gauss() {
@@ -1188,12 +1254,191 @@ const orient = (a) => {
 const sideText = (rel) => Math.abs(rel) < 2 ? "straight ahead" : Math.abs(rel) > 178 ? "directly behind"
   : `${Math.abs(rel).toFixed(0)}° ${rel > 0 ? "left" : "right"}`;
 const fbText = (d) => d.fb === null ? "front/back unknown (no back mic)" : d.fb >= FB_SURE ? "front/back sure" : "front/back unsure";
-// height from the raised mics, relative to the camera's centre (Set centre); null for a flat array
+// height from the raised mics, relative to the camera's centre (Set centre / Calibrate); null for a flat array
 const upText = (d) => {
   if (d.elev === null || d.elev === undefined) return null;
-  const e = d.elev - S.tilt;
+  const e = d.elev * S.kel - S.tilt;
   return Math.abs(e) < 5 ? "level" : `${Math.abs(e).toFixed(0)}° ${e > 0 ? "up" : "down"}`;
 };
+
+// ------------------------------------------------------------------ sound → picture, and calibrating it
+
+// Where a sound lands in the picture. The array's direction (azimuth a, + = left; elevation e, scaled by kel,
+// or the camera's own tilt when the array is flat and e is null) to a point `dist` m away; seen from the
+// camera, which sits camX / camZ mm from the array's centre (+ = left / up) and is turned by yaw (offset),
+// pitch (tilt) and roll; through a lens hfov° across. [X, Y] in half picture widths from the centre (X right,
+// Y up), or null when it's behind the camera.
+const CAM_KEYS = ["offset", "tilt", "roll", "hfov", "kel", "camX", "camZ"];
+function camProj(a, e, dist, P = S) {
+  const r = Math.PI / 180, el = (e === null || e === undefined ? P.tilt : e * P.kel) * r, az = a * r, d = dist * 1000;
+  const x = d * Math.sin(az) * Math.cos(el) - P.camX, y = d * Math.cos(az) * Math.cos(el), z = d * Math.sin(el) - P.camZ;
+  const cy = Math.cos(P.offset * r), sy = Math.sin(P.offset * r), ct = Math.cos(P.tilt * r), st = Math.sin(P.tilt * r);
+  const x1 = x * cy - y * sy, y1 = x * sy + y * cy;
+  const y2 = y1 * ct + z * st, z2 = z * ct - y1 * st;
+  if (y2 < 0.05 * Math.hypot(x1, y2, z2)) return null;
+  const fn = 1 / Math.tan((P.hfov / 2) * r), X = (-x1 / y2) * fn, Y = (z2 / y2) * fn;
+  const cr = Math.cos(P.roll * r), sr = Math.sin(P.roll * r);
+  return [X * cr - Y * sr, X * sr + Y * cr];
+}
+
+// The other way: the array direction [a, e] (e as the array would measure it) of the point `dist` m away
+// that shows at picture spot [X, Y]. For the demo's phone.
+function camUnproj(X, Y, dist, P) {
+  const r = Math.PI / 180, fn = 1 / Math.tan((P.hfov / 2) * r), cr = Math.cos(P.roll * r), sr = Math.sin(P.roll * r);
+  const X0 = X * cr + Y * sr, Y0 = Y * cr - X * sr;
+  const x1 = -X0 / fn, y2 = 1, z2 = Y0 / fn;
+  const cy = Math.cos(P.offset * r), sy = Math.sin(P.offset * r), ct = Math.cos(P.tilt * r), st = Math.sin(P.tilt * r);
+  const y1 = y2 * ct - z2 * st, z = y2 * st + z2 * ct, x = x1 * cy + y1 * sy, y = y1 * cy - x1 * sy;
+  const uu = x * x + y * y + z * z, cu = P.camX * x + P.camZ * z, cc = P.camX ** 2 + P.camZ ** 2, D = dist * 1000;
+  const s = (-cu + Math.sqrt(Math.max(0, cu * cu - uu * (cc - D * D)))) / uu;
+  const px = P.camX + s * x, py = s * y, pz = P.camZ + s * z;
+  return [Math.atan2(px, py) / r, Math.atan2(pz, Math.hypot(px, py)) / r / P.kel];
+}
+
+// What's left of each captured point's error after the fit, blended in near that point (fine-tune), so the
+// spots that were measured land exactly and the fit's shape holds in between.
+const FINE_DEG = 8;
+function calFix(a, e) {
+  if (!S.calFine || S.cal.length < 3) return [0, 0];
+  let wx = 0, wy = 0, ws = 0;
+  for (const p of S.cal) {
+    if (!p.res) continue;
+    const da = wrap(a - p.oa), de = e === null || e === undefined || p.e === null ? 0 : e - p.e;
+    const w = Math.exp(-(da * da + de * de) / (2 * FINE_DEG * FINE_DEG));
+    wx += w * p.res[0];
+    wy += w * p.res[1];
+    ws += w;
+  }
+  return [wx / Math.max(1, ws), wy / Math.max(1, ws)];
+}
+
+// canvas point of a sound from (oriented) azimuth a and elevation e, or null when it's behind the camera
+function toScreen(pic, a, e, dist = cal.on ? S.calDist : S.dist) {
+  const q = camProj(a, e, dist);
+  if (!q) return null;
+  const f = calFix(a, e);
+  return [pic.cx + ((q[0] + f[0]) * pic.w) / 2, pic.cy - ((q[1] + f[1]) * pic.w) / 2];
+}
+
+// Calibration: a phone plays the Calibration chirp (beacon.html?role=calib) from a known spot in the picture,
+// at a known distance. Each capture is the median of the last few chirps' directions; the fit finds the
+// camera's yaw, pitch, roll, view width, the elevation scale and (with more than one distance) where the
+// camera sits on the array, by least squares (Levenberg–Marquardt), with soft priors keeping whatever the
+// points can't pin down near sensible values.
+const CAL_TARGETS = [["Centre", 0.5, 0.5], ["Right edge", 0.92, 0.5], ["Left edge", 0.08, 0.5], ["Top", 0.5, 0.1],
+  ["Bottom", 0.5, 0.9], ["Top right", 0.9, 0.12], ["Top left", 0.1, 0.12], ["Bottom right", 0.9, 0.88], ["Bottom left", 0.1, 0.88]];
+const CAL_PRIOR = { offset: [0, 90], tilt: [0, 90], roll: [0, 4], hfov: [60, 40], kel: [1, 0.25], camX: [0, 60], camZ: [0, 60] };
+const CAL_STEP = { offset: 0.05, tilt: 0.05, roll: 0.05, hfov: 0.05, kel: 0.001, camX: 0.5, camZ: 0.5 };
+const CAL_SIGMA = 0.02;  // a capture's usual scatter, in half picture widths (about 1°)
+const CAL_HITS_S = 3;
+const cal = { on: false, target: 0, custom: null, since: 0, pic: null, last: null };
+
+const calAngle = (p, swap) => {
+  const b = swap ? -p.ang : p.ang;
+  return S.swapfb ? wrap(180 - b) : wrap(b);
+};
+function calResid(P, pts, swap, priors = true) {
+  const out = [];
+  for (const p of pts) {
+    const q = camProj(calAngle(p, swap), p.e, p.dist, P);
+    if (!q) { out.push(50, 50); continue; }
+    out.push((q[0] - p.X) / CAL_SIGMA);
+    if (p.e !== null) out.push((q[1] - p.Y) / CAL_SIGMA);
+  }
+  if (priors) for (const k of CAM_KEYS) out.push((P[k] - CAL_PRIOR[k][0]) / CAL_PRIOR[k][1]);
+  return out;
+}
+const sumSq = (v) => v.reduce((s, x) => s + x * x, 0);
+function calClamp(P) {
+  P.offset = wrap(P.offset);
+  P.tilt = Math.max(-70, Math.min(70, P.tilt));
+  P.roll = Math.max(-30, Math.min(30, P.roll));
+  P.hfov = Math.max(20, Math.min(150, P.hfov));
+  P.kel = Math.max(0.3, Math.min(2.5, P.kel));
+  P.camX = Math.max(-300, Math.min(300, P.camX));
+  P.camZ = Math.max(-300, Math.min(300, P.camZ));
+  return P;
+}
+function solveLin(A, b) {  // Gaussian elimination with partial pivoting; A is n×n, both are overwritten
+  const n = b.length;
+  for (let i = 0; i < n; i++) {
+    let p = i;
+    for (let j = i + 1; j < n; j++) if (Math.abs(A[j][i]) > Math.abs(A[p][i])) p = j;
+    [A[i], A[p]] = [A[p], A[i]];
+    [b[i], b[p]] = [b[p], b[i]];
+    const d = A[i][i] || 1e-12;
+    for (let j = i + 1; j < n; j++) {
+      const f = A[j][i] / d;
+      for (let k = i; k < n; k++) A[j][k] -= f * A[i][k];
+      b[j] -= f * b[i];
+    }
+  }
+  const x = new Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = b[i];
+    for (let k = i + 1; k < n; k++) s -= A[i][k] * x[k];
+    x[i] = s / (A[i][i] || 1e-12);
+  }
+  return x;
+}
+function calLM(P0, pts, swap) {
+  let P = calClamp({ ...P0 }), r = calResid(P, pts, swap), cost = sumSq(r), lam = 1e-3;
+  const n = CAM_KEYS.length;
+  for (let it = 0; it < 80; it++) {
+    const J = CAM_KEYS.map((k) => {
+      const r2 = calResid({ ...P, [k]: P[k] + CAL_STEP[k] }, pts, swap);
+      return r2.map((v, i) => (v - r[i]) / CAL_STEP[k]);
+    });
+    const A = J.map((a) => J.map((b) => a.reduce((s, v, m) => s + v * b[m], 0)));
+    const g = J.map((a) => a.reduce((s, v, m) => s + v * r[m], 0));
+    let better = false;
+    for (let tries = 0; tries < 10 && !better; tries++) {
+      const M = A.map((row, i) => row.map((v, j) => (i === j ? v * (1 + lam) + 1e-9 : v)));
+      const dx = solveLin(M, g.map((v) => -v));
+      const Q = { ...P };
+      CAM_KEYS.forEach((k, i) => { Q[k] += dx[i]; });
+      calClamp(Q);
+      const r2 = calResid(Q, pts, swap), c2 = sumSq(r2);
+      if (c2 < cost) {
+        better = cost - c2 > 1e-7 * cost;
+        P = Q; r = r2; cost = c2;
+        lam = Math.max(1e-9, lam / 4);
+        if (!better) break;
+      } else lam *= 5;
+    }
+    if (!better) break;
+  }
+  return { P, cost, data: sumSq(calResid(P, pts, swap, false)) };
+}
+// One fit from where things are now and one from the point nearest the picture's centre; the better wins.
+function calSolve(pts, swap) {
+  const now = Object.fromEntries(CAM_KEYS.map((k) => [k, S[k]]));
+  const mid = pts.reduce((b, p) => (Math.hypot(p.X, p.Y) < Math.hypot(b.X, b.Y) ? p : b));
+  const fresh = { offset: calAngle(mid, swap), tilt: mid.e ?? 0, roll: 0, hfov: S.hfov, kel: 1, camX: 0, camZ: 0 };
+  return [calLM(now, pts, swap), calLM(fresh, pts, swap)].reduce((a, b) => (b.cost < a.cost ? b : a));
+}
+// Fit to every captured point and use it. Also notices left and right being the wrong way round.
+function calFit() {
+  const pts = S.cal;
+  if (!pts.length) return null;
+  let best = calSolve(pts, S.swap), flipped = false;
+  if (pts.length >= 3 && new Set(pts.map((p) => Math.round(p.X * 4))).size >= 2) {
+    const other = calSolve(pts, !S.swap);
+    if (other.data < 0.3 * best.data && best.data / pts.length > 9) { best = other; S.swap = !S.swap; flipped = true; }
+  }
+  Object.assign(S, best.P);
+  const fn = 1 / Math.tan(((S.hfov / 2) * Math.PI) / 180);
+  let sq = 0;
+  for (const p of pts) {
+    p.oa = calAngle(p, S.swap);
+    const q = camProj(p.oa, p.e, p.dist) || [0, 0];
+    p.res = [p.X - q[0], p.e === null ? 0 : p.Y - q[1]];
+    p.err = (Math.atan(Math.hypot(...p.res) / fn) * 180) / Math.PI;
+    sq += p.err * p.err;
+  }
+  save();
+  return { rms: Math.sqrt(sq / pts.length), flipped };
+}
 
 // ------------------------------------------------------------------ voice focus (StreamingFocus from mic_caption_view.py)
 
@@ -1791,9 +2036,9 @@ function drawCamera(r) {
   ctx.beginPath();
   ctx.rect(pic.x, pic.y, pic.w, pic.h);
   ctx.clip();
+  cal.pic = pic;
   const half = S.hfov / 2, f = pic.w / 2 / Math.tan((half * Math.PI) / 180);
   const xOf = (rel) => pic.cx - f * Math.tan((Math.max(-89, Math.min(89, rel)) * Math.PI) / 180);
-  const yOf = (el) => pic.cy - f * Math.tan((Math.max(-80, Math.min(80, el)) * Math.PI) / 180);
   // ruler
   ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
   ctx.fillRect(pic.x, pic.b - 24, pic.w, 24);
@@ -1810,10 +2055,12 @@ function drawCamera(r) {
   const now = model.now, recent = model.dets.filter((d) => now - d.t < HOLD_S);
   let behindShown = false;
   for (const d of recent) {
-    const fade = 1 - (now - d.t) / HOLD_S, rel = wrap(orient(d.angle) - S.offset);
+    const fade = 1 - (now - d.t) / HOLD_S, a = orient(d.angle), rel = wrap(a - S.offset), el = d.elev ?? null;
     const color = kindColor(d), latest = d === recent[recent.length - 1];
-    if (Math.abs(rel) <= half) {
-      const x = xOf(rel), spread = Math.abs(xOf(rel + d.sigma) - xOf(rel - d.sigma)) / 2;
+    const at = Math.abs(rel) < 90 ? toScreen(pic, a, el) : null;
+    if (at && at[0] >= pic.x && at[0] <= pic.r) {
+      const x = at[0], xs = (da) => toScreen(pic, a + da, el)?.[0] ?? x;
+      const spread = Math.abs(xs(d.sigma) - xs(-d.sigma)) / 2;
       const hw = Math.max(18, spread) * 2, g = ctx.createLinearGradient(x - hw, 0, x + hw, 0);
       g.addColorStop(0, alpha(color, 0));
       g.addColorStop(0.5, alpha(color, latest ? 0.55 * fade : 0.25 * fade));
@@ -1827,7 +2074,7 @@ function drawCamera(r) {
       ctx.lineTo(x, pic.b);
       ctx.stroke();
       if (d.elev !== null && d.elev !== undefined) {  // the raised mics give its height: ring at that spot
-        const y = Math.max(pic.y + 16, Math.min(pic.b - 40, yOf(d.elev - S.tilt)));
+        const y = Math.max(pic.y + 16, Math.min(pic.b - 40, at[1]));
         ctx.beginPath();
         ctx.arc(x, y, latest ? 16 : 10, 0, 2 * Math.PI);
         ctx.strokeStyle = alpha(color, (latest ? 1 : 0.6) * fade);
@@ -1850,6 +2097,7 @@ function drawCamera(r) {
       } else drawSideArrow(pic, rel, d, fade, color, behind, half);
     }
   }
+  if (cal.on) drawCalib(pic);
   ctx.restore();
   drawCaptions(pic, f, behindShown ? 130 : 30);
   text("In view: glow at its spot. Out of view: arrow on that edge; behind you: arrow at the bottom.",
@@ -1888,6 +2136,55 @@ function drawBehindArrow(pic, rel, d, fade, color) {
   labelBox(x - w / 2, y - 90, lines, color, pic);
 }
 
+// Calibration on the picture: every spot faintly, the one to put the phone on as a big cross, and each
+// captured point as a cross (where the phone was) joined to a dot (where the fit now puts its sound).
+function drawCalib(pic) {
+  const spot = (fx, fy) => [pic.x + fx * pic.w, pic.y + fy * pic.h];
+  const cross = (x, y, s, color, w) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+    ctx.moveTo(x, y - s); ctx.lineTo(x, y + s);
+    ctx.stroke();
+  };
+  for (const [, fx, fy] of CAL_TARGETS) cross(...spot(fx, fy), 6, "rgba(230, 237, 243, 0.35)", 1);
+  const labels = new Map();  // one label per spot, listing its distances
+  for (const p of S.cal) {
+    const key = `${p.fx.toFixed(3)},${p.fy.toFixed(3)}`;
+    if (!labels.has(key)) labels.set(key, { p, d: new Set() });
+    labels.get(key).d.add(p.dist);
+  }
+  for (const { p, d } of labels.values()) {
+    const [tx, ty] = spot(p.fx, p.fy);
+    const right = p.fx > 0.75;
+    text(`${[...d].sort((a, b) => a - b).join(" · ")} m`, right ? tx - 12 : tx + 12, ty + 14, 11, INK, right ? "right" : "left");
+  }
+  for (const p of S.cal) {
+    const [tx, ty] = spot(p.fx, p.fy), q = camProj(p.oa ?? calAngle(p, S.swap), p.e, p.dist);
+    const f = calFix(p.oa ?? 0, p.e), col = p.err === undefined ? DIM : p.err < 2 ? "#3fb950" : p.err < 5 ? "#e3b341" : "#f85149";
+    cross(tx, ty, 9, INK, 2);
+    if (q) {
+      const dx = pic.cx + ((q[0] + f[0]) * pic.w) / 2, dy = pic.cy - ((q[1] + f[1]) * pic.w) / 2;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(dx, dy); ctx.stroke();
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(dx, dy, 5, 0, 2 * Math.PI); ctx.fill();
+    }
+  }
+  const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), [x, y] = spot(fx, fy);
+  ctx.beginPath();
+  ctx.arc(x, y, 22, 0, 2 * Math.PI);
+  ctx.strokeStyle = "#56d4dd";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  cross(x, y, 32, "#56d4dd", 3);
+  const hits = model.dets.filter((d) => d.kind === "calib" && d.t > cal.since && model.now - d.t < CAL_HITS_S).length;
+  const name = cal.custom ? "Tapped spot" : CAL_TARGETS[cal.target][0];
+  labelBox(x + 30, y - 50, [`Phone's speaker here · ${name}`, `${S.calDist} m away · ${hits} chirp${hits === 1 ? "" : "s"} heard`], "#56d4dd", pic);
+}
+
 function where(angle) {
   if (angle === null) return [null, "in"];
   const rel = wrap(orient(angle) - S.offset);
@@ -1908,7 +2205,7 @@ function drawCaptions(pic, f, lift) {
   if (cap.interim) {
     const [rel, side] = where(cap.interim.angle);
     if (rel !== null && side === "in") {
-      const x = pic.cx - f * Math.tan((rel * Math.PI) / 180);
+      const x = toScreen(pic, orient(cap.interim.angle), null)?.[0] ?? pic.cx - f * Math.tan((rel * Math.PI) / 180);
       ctx.font = font(13, true);
       const w = ctx.measureText("speaking").width + 30;
       rrect(x - w / 2, pic.y + 12, w, 26, 13);
@@ -2329,6 +2626,9 @@ setInterval(() => {
 // goes back to all eight when the requests stop.
 setInterval(() => {
   if (conn && !(conn instanceof DemoConn) && connState === "streaming" && !boardFw) conn.send(new Uint8Array([63]));  // '?': which firmware
+  // Chrome's Web Serial on macOS loses 0xFF bytes (camera frames break, mic packets go missing), so ask the
+  // board for a stream without any. Boards that don't know 'x' ignore it.
+  if (conn instanceof SerialConn && connState === "streaming") conn.send(new Uint8Array([120]));  // 'x'
   if (!(conn instanceof UsbConn) || connState !== "streaming" || model.total < FS) return;
   let mask = 0;
   for (const ch of model.chans) mask |= 1 << ch;
@@ -2341,6 +2641,7 @@ setInterval(() => {
   const t0 = performance.now();
   model.tick(S.thr, t0 < cap.voiceUntil);
   if (S.find) findBuzz(S.findMode === "alarm" ? alarm.process() : beacon.process(FIND_MODES[S.findMode].codes));
+  else if (cal.on) beacon.process(["calib"]);
   busy.ms += performance.now() - t0;
 }, 33);
 
@@ -2396,15 +2697,24 @@ function lastAngle() {
   return orient(d.angle);
 }
 
+// the quick buttons replace a calibration: its points no longer match
+function dropCal(why) {
+  if (!S.cal.length) return "";
+  S.cal = [];
+  Object.assign(S, { roll: 0, kel: 1, camX: 0, camZ: 0 });
+  calShow();
+  return ` (${why}: calibration points cleared)`;
+}
 $("centre").onclick = () => {
   const a = lastAngle();
   if (a === null) return;
+  const dropped = dropCal("Set centre");
   S.offset = a;
   const el = model.last.elev;
   if (el !== null && el !== undefined) S.tilt = el;
   save();
   hint(`Centre set: picture centre = ${a >= 0 ? "+" : ""}${a.toFixed(0)}° on the array` +
-       (el !== null && el !== undefined ? `, ${el.toFixed(0)}° up.` : "."));
+       (el !== null && el !== undefined ? `, ${el.toFixed(0)}° up.` : ".") + dropped);
 };
 $("edge").onclick = () => {
   const a = lastAngle();
@@ -2414,15 +2724,133 @@ $("edge").onclick = () => {
     hint(`That clap was ${half.toFixed(0)}° from centre; clap at the RIGHT edge, or try Swap L/R.`);
     return;
   }
+  const dropped = dropCal("Right edge");
   S.hfov = 2 * half;
   save();
   uiSync();
-  hint(`Field of view set to ${S.hfov.toFixed(0)}°.`);
+  hint(`Field of view set to ${S.hfov.toFixed(0)}°.${dropped}`);
 };
-$("swaplr").onclick = () => { S.swap = !S.swap; save(); uiSync(); };
-$("swapfb").onclick = () => { S.swapfb = !S.swapfb; save(); uiSync(); };
-$("mirror").onclick = () => { S.mirror = !S.mirror; save(); uiSync(); };
-$("rotate").onclick = () => { S.rotate = (S.rotate + 90) % 360; save(); uiSync(); };
+
+// ---- calibration controls
+for (const [i, [name]] of CAL_TARGETS.entries()) {
+  const o = document.createElement("option");
+  o.value = i;
+  o.textContent = name;
+  $("caltarget").appendChild(o);
+}
+const median = (v) => {
+  const s = v.slice().sort((a, b) => a - b), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+function calShow(res = null) {
+  $("calbar").classList.toggle("open", cal.on);
+  $("calib").classList.toggle("on", cal.on);
+  $("calfine").classList.toggle("on", S.calFine);
+  $("caltarget").value = cal.custom ? "" : cal.target;
+  $("caldist").value = String(S.calDist);
+  $("usualdist").value = S.dist;
+  const n = S.cal.length;
+  if (!n) { $("calinfo").textContent = "no points yet"; return; }
+  if (!res) {
+    const errs = S.cal.filter((p) => p.err !== undefined).map((p) => p.err);
+    res = { rms: errs.length ? Math.sqrt(errs.reduce((s, e) => s + e * e, 0) / errs.length) : 0 };
+  }
+  const dists = new Set(S.cal.map((p) => p.dist)).size;
+  const cm = (v, pos, neg) => `${Math.abs(v / 10).toFixed(0)} cm ${v >= 0 ? pos : neg}`;
+  $("calinfo").textContent = `${n} point${n === 1 ? "" : "s"} at ${dists} distance${dists === 1 ? "" : "s"} · off by ${res.rms.toFixed(1)}° (rms)` +
+    ` · view ${S.hfov.toFixed(0)}° · aim ${sideText(S.offset)}, ${S.tilt >= 0 ? "+" : ""}${S.tilt.toFixed(0)}° up · roll ${S.roll.toFixed(1)}°` +
+    (S.kel !== 1 ? ` · height ×${S.kel.toFixed(2)}` : "") +
+    (dists > 1 ? ` · camera ${cm(S.camX, "left", "right")}, ${cm(S.camZ, "up", "down")} of the mics` : "");
+}
+function setCal(on) {
+  cal.on = on;
+  if (on) {
+    if (S.find) setFind(false);
+    beacon.reset();
+    model.dets = [];
+    model.last = null;
+    cal.since = model.now;
+    hint(`On a phone open ${beaconUrl("calib")} and tap Start. Put its speaker on the cyan cross, wait for chirps, ` +
+         "then Capture. Phone not exactly on the cross? Tap where it is in the picture first.");
+  } else {
+    model.dets = [];
+    hint(S.cal.length ? "Calibration saved." : "Calibrate: put a phone playing the calibration chirp on spots in the picture");
+  }
+  calShow();
+}
+function calCapture() {
+  const hits = model.dets.filter((d) => d.kind === "calib" && d.t > cal.since && model.now - d.t < CAL_HITS_S);
+  if (hits.length < 4) {
+    hint(`Only ${hits.length} chirp${hits.length === 1 ? "" : "s"} heard in the last ${CAL_HITS_S} s: is the phone on ` +
+         "the Calibrate sound with the volume up? Closer, or lower the Trigger in More.");
+    return;
+  }
+  const ref = hits[hits.length - 1].angle, rel = hits.map((d) => wrap(d.angle - ref));
+  let mid = median(rel);
+  const els = hits.map((d) => d.elev).filter((v) => v !== null && v !== undefined);
+  const spread = median(rel.map((v) => Math.abs(v - mid)));
+  // finer than the 1° grid: the chirps near the median, their curves summed, parabola through the peak
+  const sum = new Float64Array(360);
+  for (const [i, d] of hits.entries()) if (Math.abs(rel[i] - mid) <= Math.max(2, 2 * spread)) for (let k = 0; k < 360; k++) sum[k] += d.curve[k];
+  const k0 = (((Math.round(ref + mid) + 180) % 360) + 360) % 360, y0 = sum[(k0 + 359) % 360], y1 = sum[k0], y2 = sum[(k0 + 1) % 360];
+  const den = y0 - 2 * y1 + y2;
+  if (den < 0 && y1 >= y0 && y1 >= y2) mid = wrap(k0 - 180 + (0.5 * (y0 - y2)) / den - ref);
+  const name = cal.custom ? "the tapped spot" : CAL_TARGETS[cal.target][0];
+  const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), pic = cal.pic;
+  const aspect = pic ? pic.h / pic.w : 0.75;
+  S.cal.push({ ang: wrap(ref + mid), e: els.length ? median(els) : null, dist: S.calDist, fx, fy,
+               X: (fx - 0.5) * 2, Y: (0.5 - fy) * 2 * aspect, n: hits.length, spread });
+  cal.since = model.now;
+  const res = calFit(), p = S.cal[S.cal.length - 1];
+  let msg = `Captured ${name} at ${S.calDist} m: ${hits.length} chirps, ±${spread.toFixed(1)}° scatter; now off by ${p.err.toFixed(1)}° there.`;
+  if (spread > 4) msg += " That scatter is high: quieter room, phone louder or closer, then Undo and capture again.";
+  if (res.flipped) msg += " Left and right were the wrong way round: Swap L/R turned on.";
+  // walk the five main spots, then suggest another distance (that's what pins down where the camera sits)
+  if (!cal.custom) {
+    cal.target = (cal.target + 1) % 5;
+    msg += cal.target === 0 ? " Five spots done: move the phone to another distance and go round again." : ` Next: ${CAL_TARGETS[cal.target][0]}.`;
+  }
+  cal.custom = null;
+  hint(msg);
+  calShow(res);
+  uiSync();
+}
+$("calib").onclick = () => setCal(!cal.on);
+$("caldone").onclick = () => setCal(false);
+$("calgrab").onclick = calCapture;
+$("caltarget").onchange = (e) => { cal.target = +e.target.value; cal.custom = null; cal.since = model.now; };
+$("caldist").onchange = (e) => { S.calDist = +e.target.value; cal.since = model.now; save(); };
+$("usualdist").onchange = (e) => { S.dist = Math.max(0.3, Math.min(10, +e.target.value || 1.5)); save(); calShow(); };
+$("calfine").onclick = () => { S.calFine = !S.calFine; save(); calShow(); };
+$("calundo").onclick = () => {
+  if (!S.cal.length) return;
+  S.cal.pop();
+  const res = calFit();
+  save();
+  calShow(res);
+  hint(S.cal.length ? "Last point removed." : "No points left.");
+};
+$("calclear").onclick = () => {
+  if (S.cal.length && !confirm(`Delete all ${S.cal.length} calibration points?`)) return;
+  dropCal("Clear all");
+  save();
+  hint("Calibration points cleared; the view and aim stay as they were.");
+};
+// tap the picture: the phone is there (when it isn't exactly on the cross)
+cv.addEventListener("pointerdown", (e) => {
+  if (!cal.on || !cal.pic) return;
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, pic = cal.pic;
+  if (x < pic.x || x > pic.r || y < pic.y || y > pic.b) return;
+  cal.custom = [(x - pic.x) / pic.w, (y - pic.y) / pic.h];
+  cal.since = model.now;
+  calShow();
+  hint("Spot moved to where you tapped. Capture when the chirps are coming from there.");
+});
+const refit = () => { if (S.cal.length) calShow(calFit()); };
+$("swaplr").onclick = () => { S.swap = !S.swap; refit(); save(); uiSync(); };
+$("swapfb").onclick = () => { S.swapfb = !S.swapfb; refit(); save(); uiSync(); };
+$("mirror").onclick = () => { S.mirror = !S.mirror; hint("Mirrored." + dropCal("Mirror")); save(); uiSync(); };
+$("rotate").onclick = () => { S.rotate = (S.rotate + 90) % 360; hint(`Rotated ${S.rotate}°.` + dropCal("Rotate")); save(); uiSync(); };
 $("fov").onchange = (e) => { S.hfov = Math.max(20, Math.min(140, +e.target.value || 60)); save(); uiSync(); };
 $("thr").oninput = (e) => { S.thr = +e.target.value; save(); uiSync(); };
 $("layout").onchange = (e) => { S.layout = e.target.value; model.setGeom(PRESETS[S.layout].geom); save(); };
@@ -2464,7 +2892,8 @@ function setFind(on) {
     alarm: "Alarm: shows which way a beeping or steady alarm is; long buzz when one starts",
     evac: "Evacuate: phones play Exit or Danger tones (beacon page); go where the green arrow points, away from red",
   };
-  hint(on ? hints[S.findMode] : "Clap ahead → Set centre · clap at the right edge → Right edge");
+  if (on && cal.on) setCal(false);
+  hint(on ? hints[S.findMode] : "Calibrate: put a phone playing the calibration chirp on spots in the picture");
 }
 
 $("cc").onclick = () => {
@@ -2497,6 +2926,7 @@ async function connect(c) {
   fwLayoutDone = false;
   lastSeq = null;
   gaps = 0;
+  parser.reset();
   $("connect").classList.add("hidden");
   focus = null;
   await c.run((data) => {
@@ -2547,6 +2977,7 @@ if (!("serial" in navigator) && !("usb" in navigator)) {
 }
 if (S.find) setFind(true);
 uiSync();
+calShow();
 resize();
 requestAnimationFrame(render);
 if (cap.on) asrLoad();
