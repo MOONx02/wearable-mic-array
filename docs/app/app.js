@@ -34,7 +34,7 @@ const PRESETS = {
 
 const S = Object.assign({ layout: "vest6", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
                           mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow",
-                          roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true },
+                          roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true, camOff: false },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
 if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
@@ -301,7 +301,7 @@ class Model {
     // while someone talks, show the whole phrase's direction (as the subtitles do), not one 64 ms snapshot
     const phrase = voice ? speechCurve() : null;
     const curve = phrase && phrase.n >= 5 ? phrase.sum : this.srp(srcs, st);
-    this.add({ t: this.now, ...pick(curve, st), strength, curve, n: act.length });
+    this.add({ t: this.now, ...pick(curve, st), strength, curve, n: act.length, voice });
   }
 
   add(det) {
@@ -840,7 +840,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v18";
+const APP_VERSION = "v19";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -991,7 +991,7 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
     return new Promise((resolve) => {
       this.timer = setInterval(() => {
         if (this.closed) { clearInterval(this.timer); return resolve(); }
-        if (cam && !camBusy && performance.now() >= nextCam) {  // 10 fps JPEG, like the board's camera
+        if (cam && !S.camOff && !camBusy && performance.now() >= nextCam) {  // 10 fps JPEG, like the board's camera
           nextCam = performance.now() + 100;
           camBusy = true;
           demoPicture(cam.getContext("2d"), made / FS);
@@ -1207,6 +1207,7 @@ const parser = new Parser({
   jpeg(bytes) {
     const now = performance.now();
     rxTimes.push(now);
+    if (S.camOff) return;  // a board without 'c' keeps sending: don't spend the tablet's time decoding
     // frames can arrive several at once; keep the newest and show it when the current decode is done
     if (decoding && now - decoding < 1000) { pendingJpeg = bytes; return; }  // a hung decode mustn't freeze it
     pendingJpeg = null;
@@ -2187,24 +2188,28 @@ function drawCalib(pic) {
 
 function where(angle) {
   if (angle === null) return [null, "in"];
+  if (S.camOff) {  // no picture: relative to straight ahead, "in" = roughly in front of you
+    const a = orient(angle);
+    return [a, Math.abs(a) <= 20 ? "in" : a > 0 ? "left" : "right"];
+  }
   const rel = wrap(orient(angle) - S.offset);
   if (Math.abs(rel) <= S.hfov / 2) return [rel, "in"];
   return [rel, rel > 0 ? "left" : "right"];
 }
 
-function drawCaptions(pic, f, lift) {
+function drawCaptions(pic, f, lift, opts = {}) {
   if (!cap.on) return;
-  const now = performance.now() / 1000;
-  const rows = cap.lines.filter((l) => now - l.wall < CAPTION_HOLD_S).slice(-2).map((l) => ({ ...l, interim: false }));
+  const now = performance.now() / 1000, keep = opts.rows || 3;
+  const rows = cap.lines.filter((l) => now - l.wall < CAPTION_HOLD_S).slice(-Math.min(2, keep)).map((l) => ({ ...l, interim: false }));
   if (cap.interim) rows.push({ ...cap.interim, interim: true });
-  const show = rows.slice(-3);
+  const show = rows.slice(-keep);
   ctx.save();
   ctx.beginPath();
   ctx.rect(pic.x, pic.y, pic.w, pic.h);
   ctx.clip();
   if (cap.interim) {
     const [rel, side] = where(cap.interim.angle);
-    if (rel !== null && side === "in") {
+    if (rel !== null && side === "in" && !S.camOff) {
       const x = toScreen(pic, orient(cap.interim.angle), null)?.[0] ?? pic.cx - f * Math.tan((rel * Math.PI) / 180);
       ctx.font = font(13, true);
       const w = ctx.measureText("speaking").width + 30;
@@ -2222,7 +2227,7 @@ function drawCaptions(pic, f, lift) {
     }
   }
   if (show.length) {
-    const px = Math.max(16, Math.round(pic.w / 30)), width = pic.w * 0.9, lh = px * 1.25;
+    const px = opts.px || Math.max(16, Math.round(pic.w / 30)), width = pic.w * 0.9, lh = px * 1.25;
     const blocks = show.map((row) => {
       const [, side] = where(row.angle);
       let label = row.text.length < 160 ? row.text : "…" + row.text.slice(-158);
@@ -2434,7 +2439,7 @@ function drawTranscript(r) {
     const [rel, side] = where(ln.angle);
     const t = new Date(performance.timeOrigin + ln.wall * 1000).toLocaleTimeString();
     y -= 16;
-    text(`${t}${rel === null ? "" : ` · ${sideText(rel)}${side === "in" ? "" : " (off screen)"}`}`, inner.x, y + 7, 11, DIM);
+    text(`${t}${rel === null ? "" : ` · ${sideText(rel)}${side === "in" || S.camOff ? "" : " (off screen)"}`}`, inner.x, y + 7, 11, DIM);
     y -= 8;
   }
   if (!cap.lines.length && cap.on && asr.status) {
@@ -2549,6 +2554,264 @@ function drawFinder(r) {
     tx, cy + 46, 12, DIM);
 }
 
+// ------------------------------------------------------------------ camera off: the big radar
+
+const soundName = (d) => (d.kind ? KINDS[d.kind].name : d.voice ? "Voice" : d.strength > 30 ? "Loud sound" : "Sound");
+const soundColor = (d) => (d.kind || !d.voice ? kindColor(d) : SPEAKER);
+const vestText = (d) => {
+  if (d.elev === null || d.elev === undefined) return "";
+  const e = d.elev * S.kel;
+  return Math.abs(e) < 8 ? "level with the vest" : `${Math.abs(e).toFixed(0)}° ${e > 0 ? "above" : "below"} the vest`;
+};
+const agoText = (s) => (s < 0.5 ? "just now" : `${s.toFixed(s < 10 ? 1 : 0)} s ago`);
+
+function arrow(x0, y0, x1, y1, w, color) {
+  const len = Math.hypot(x1 - x0, y1 - y0), head = Math.min(len * 0.6, w * 2.4);
+  ctx.save();
+  ctx.translate(x0, y0);
+  ctx.rotate(Math.atan2(y1 - y0, x1 - x0));
+  ctx.beginPath();
+  ctx.moveTo(0, -w / 2);
+  ctx.lineTo(len - head, -w / 2);
+  ctx.lineTo(len - head, -head * 0.62);
+  ctx.lineTo(len, 0);
+  ctx.lineTo(len - head, head * 0.62);
+  ctx.lineTo(len - head, w / 2);
+  ctx.lineTo(0, w / 2);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+}
+
+// curved "turn this way" arrow from straight ahead toward angle a, at radius rad
+function turnArc(cx, cy, rad, a, color) {
+  const end = Math.sign(a) * Math.min(Math.abs(a) - 6, 150), th = canvasAngle(end);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, canvasAngle(0), th, a > 0);
+  ctx.stroke();
+  ctx.lineCap = "butt";
+  const dir = th + (a > 0 ? -Math.PI / 2 : Math.PI / 2), [hx, hy] = polar(cx, cy, rad, end);
+  const ux = Math.cos(dir), uy = Math.sin(dir), k = 9;
+  ctx.beginPath();
+  ctx.moveTo(hx + ux * k, hy + uy * k);
+  ctx.lineTo(hx - ux * k - uy * k, hy - uy * k + ux * k);
+  ctx.lineTo(hx - ux * k + uy * k, hy - uy * k - ux * k);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function pill(x, y, t, color, px = 13, bounds = null) {
+  ctx.font = font(px, true);
+  const w = ctx.measureText(t).width + 18, h = px + 12;
+  if (bounds) {
+    x = Math.max(bounds.x + w / 2 + 4, Math.min(bounds.r - w / 2 - 4, x));
+    y = Math.max(bounds.y + h / 2 + 4, Math.min(bounds.b - h / 2 - 4, y));
+  }
+  rrect(x - w / 2, y - h / 2, w, h, h / 2);
+  ctx.fillStyle = "rgba(13, 17, 23, 0.9)";
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  text(t, x, y + 1, px, INK, "center", true);
+}
+
+// the wearer seen from above, facing up (the front), with the mics where they sit on the vest
+function drawWearer(cx, cy, s) {
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, s * 1.15, s * 0.42, 0, 0, 2 * Math.PI);
+  ctx.fillStyle = "#30363d";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy - s * 0.12, s * 0.36, 0, 2 * Math.PI);
+  ctx.fillStyle = "#484f58";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.12, cy - s * 0.44);
+  ctx.lineTo(cx, cy - s * 0.66);
+  ctx.lineTo(cx + s * 0.12, cy - s * 0.44);
+  ctx.closePath();
+  ctx.fill();
+  const maxd = Math.max(1, ...Object.values(model.geom).map(([, x]) => Math.abs(x)));
+  model.chans.forEach((ch, k) => {
+    const [, x, , z] = model.geom[ch];
+    const mx = S.swap ? -x : x, col = model.source(ch) !== null ? COLORS[k % COLORS.length] : "#484f58";
+    const px = cx - (mx / maxd) * s * 0.95, py = cy + s * 0.2 - (z > 0 ? s * 0.3 : 0);
+    ctx.beginPath();
+    ctx.arc(px, py, z > 0 ? 5 : 4, 0, 2 * Math.PI);
+    if (z > 0) { ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke(); } else { ctx.fillStyle = col; ctx.fill(); }
+  });
+}
+
+// the last few separate sounds, newest first
+function recentSounds(maxAge, n) {
+  const out = [];
+  for (let i = model.dets.length - 1; i >= 0 && out.length < n; i--) {
+    const d = model.dets[i], age = model.now - d.t;
+    if (age > maxAge) break;
+    const a = orient(d.angle);
+    // one entry per source: the same kind of sound from about the same way within a few seconds is the same one
+    if (out.some((o) => soundName(o.d) === soundName(d) && Math.abs(wrap(o.a - a)) < 25 && o.d.t - d.t < 6)) continue;
+    out.push({ d, a, age });
+  }
+  return out;
+}
+
+function drawRadar(r) {
+  panel(r, "Sound around you · camera off");
+  const now = model.now, d = model.last, live = d && now - d.t < 4;
+  const head = Math.max(70, Math.min(96, r.h * 0.13));
+  const capPx = Math.round(Math.max(15, Math.min(22, r.w / 42)));
+  const foot = cap.on ? Math.min(r.h * 0.3, capPx * 1.25 * 4 + 40) : 20;  // two subtitles of two lines each
+  const listW = r.w >= 560 ? Math.min(240, r.w * 0.3) : 0;  // room on the left for the recent sounds
+  const cy = r.y + head + (r.h - head - foot) / 2, cx = r.x + listW + (r.w - listW) / 2;
+  const rad = Math.max(40, Math.min((r.w - listW) * 0.36, (r.h - head - foot) / 2 - 30));
+  const big = Math.max(18, Math.min(34, r.w / 24));
+
+  // what and where, in words
+  if (live) {
+    const a = orient(d.angle), age = now - d.t;
+    text(`${soundName(d)} · ${sideText(a)}`, cx, r.y + 30 + big / 2, big, soundColor(d), "center", true);
+    const turn = Math.abs(a) < 20 ? "in front of you" : turnText(a);
+    const bits = [turn, agoText(age), vestText(d), d.fb === null ? "or behind you: no back mic yet" : fbText(d)].filter(Boolean);
+    text(bits.join(" · "), cx, r.y + 34 + big + 14, Math.max(12, big * 0.5), DIM, "center");
+  } else {
+    text(S.find ? "Find mode: see the panel on the right" : "Listening… clap, snap or talk", cx, r.y + 30 + big / 2,
+      Math.max(16, big * 0.7), DIM, "center");
+  }
+
+  // the dial
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
+  ctx.fillStyle = "#0f141a";
+  ctx.fill();
+  ctx.strokeStyle = EDGE;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, rad, canvasAngle(20), canvasAngle(-20));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(88, 166, 255, 0.09)";
+  ctx.fill();
+  ctx.setLineDash([4, 6]);
+  ctx.strokeStyle = "#21262d";
+  ctx.lineWidth = 1;
+  for (const f of [0.36, 0.68]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad * f, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  for (let a = -165; a <= 180; a += 15) {
+    const long = a % 45 === 0, [x1, y1] = polar(cx, cy, rad, a), [x2, y2] = polar(cx, cy, rad * (long ? 0.9 : 0.95), a);
+    ctx.strokeStyle = long ? DIM : EDGE;
+    ctx.lineWidth = long ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    if (a % 30 === 0 && a % 90 !== 0) {
+      const [tx, ty] = polar(cx, cy, rad * 0.82, a);
+      text(`${Math.abs(a)}°`, tx, ty, 11, DIM, "center");
+    }
+  }
+  const lbl = Math.max(13, Math.min(18, rad / 12));
+  for (const [t, a] of [["FRONT", 0], ["BACK", 180], ["LEFT", 90], ["RIGHT", -90]]) {
+    const [x, y] = polar(cx, cy, rad + lbl + 8, a);
+    text(t, x, y, lbl, INK, "center", true);
+  }
+  text("you face this way", cx, cy - rad * 0.78, 11, alpha("#58a6ff", 0.8), "center");
+  drawWearer(cx, cy, rad * 0.17);
+
+  // sounds of the last few seconds
+  for (const det of model.dets) {
+    const age = now - det.t;
+    if (age > 8) continue;
+    const [x, y] = polar(cx, cy, rad * 0.9, orient(det.angle));
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, 2 * Math.PI);
+    ctx.fillStyle = alpha(soundColor(det), 0.55 * (1 - age / 8));
+    ctx.fill();
+  }
+
+  // who's talking (the subtitles' direction)
+  const talk = cap.on && cap.interim && cap.interim.angle !== null && cap.interim.angle !== undefined ? orient(cap.interim.angle) : null;
+  if (talk !== null) {
+    const [x, y] = polar(cx, cy, rad * 0.9, talk);
+    ctx.beginPath();
+    ctx.arc(x, y, 11, 0, 2 * Math.PI);
+    ctx.fillStyle = SPEAKER;
+    ctx.fill();
+    text("talking", x, y - 22, 12, SPEAKER, "center", true);
+  }
+
+  // the newest sound: a big arrow, how wide the estimate is, which way to turn
+  if (live) {
+    const a = orient(d.angle), fade = Math.max(0.35, 1 - (now - d.t) / 4), col = soundColor(d);
+    const w = Math.max(10, rad * 0.075), r0 = rad * 0.26;
+    if (d.fb === null && Math.abs(a) > 12 && Math.abs(a) < 168) {  // a flat array can't tell front from back
+      const m = wrap(180 - a), [gx0, gy0] = polar(cx, cy, r0, m), [gx1, gy1] = polar(cx, cy, rad * 0.8, m);
+      arrow(gx0, gy0, gx1, gy1, w * 0.55, alpha(col, 0.18 * fade));
+      const [qx, qy] = polar(cx, cy, rad * 0.62, m);
+      text("or here?", qx, qy, 12, alpha(INK, 0.55), "center");
+    }
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, rad * 0.97, canvasAngle(a + d.sigma), canvasAngle(a - d.sigma));
+    ctx.closePath();
+    ctx.fillStyle = alpha(col, 0.16 * fade);
+    ctx.fill();
+    const [x0, y0] = polar(cx, cy, r0, a), [x1, y1] = polar(cx, cy, rad * 0.97, a);
+    arrow(x0, y0, x1, y1, w, alpha(col, fade));
+    if (Math.abs(a) >= 20) {
+      turnArc(cx, cy, rad * 0.46, a, alpha(INK, 0.55 * fade));
+      const mid = Math.sign(a) * Math.min(Math.abs(a), 150) / 2, [mx, my] = polar(cx, cy, rad * 0.46 + 18, mid);
+      text(Math.abs(a) > 165 ? "turn around" : `turn ${a > 0 ? "left" : "right"}`, mx, my, 12, alpha(INK, 0.75 * fade), "center", true);
+    }
+    const nearAxis = Math.abs(a) < 22 || Math.abs(a) > 158;  // beside FRONT / BACK, not on top of them
+    const [px, py] = polar(cx, cy, rad + lbl + (nearAxis ? 8 : 34), a);
+    pill(px + (nearAxis ? (a > 0 ? -1 : 1) * (lbl * 3 + 40) : 0), py, sideText(a), col, 14,
+      R(r.x, r.y + head, r.w, r.h - head - foot));
+  }
+
+  // list of recent sounds, each with its own little arrow
+  const list = recentSounds(15, 5), lx = r.x + 16;
+  if (listW) {
+    let y = r.y + head + 14;
+    text("Recent sounds", lx, y, 12, DIM, "left", true);
+    y += 24;
+    if (!list.length) text("none in the last 15 s", lx, y, 12, DIM);
+    for (const { d: det, a, age } of list) {
+      const col = soundColor(det), [ax, ay] = [lx + 12, y];
+      ctx.beginPath();
+      ctx.arc(ax, ay, 12, 0, 2 * Math.PI);
+      ctx.fillStyle = "#0f141a";
+      ctx.fill();
+      ctx.strokeStyle = EDGE;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      const [tx, ty] = polar(ax, ay, 10, a), [bx, by] = polar(ax, ay, -6, a);
+      arrow(bx, by, tx, ty, 3, alpha(col, Math.max(0.35, 1 - age / 15)));
+      text(`${soundName(det)} · ${sideText(a)}`, lx + 32, y - 7, 13, INK, "left", true);
+      text(agoText(age), lx + 32, y + 9, 11, DIM);
+      y += 40;
+      if (y > r.b - foot - 10) break;
+    }
+  }
+
+  drawCaptions(R(r.x + 12, r.y + 34, r.w - 24, r.h - 44), 0, 4, { rows: 2, px: capPx });
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
+  ctx.fillStyle = INK;
+  ctx.fill();
+}
+
 let lastDraw = 0;
 function render(now) {
   requestAnimationFrame(render);
@@ -2563,6 +2826,20 @@ function draw() {
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
   const g = 10;
+  if (S.camOff) {  // the radar takes the camera's place
+    if (W >= H * 1.15) {
+      const lw = W * 0.64, x1 = lw + g / 2, cw = W - x1 - g, th = (H - 3 * g) * 0.62;
+      drawRadar(R(g, g, lw - 1.5 * g, H - 2 * g));
+      (S.find ? drawFinder : drawTranscript)(R(x1, g, cw, th));
+      drawLevels(R(x1, 2 * g + th, cw, H - 3 * g - th));
+    } else {
+      const rh = Math.min(W * 1.05, H * 0.62), y = rh + 2 * g, bh = H - y - g, lw = (W - 3 * g) * 0.4;
+      drawRadar(R(g, g, W - 2 * g, rh));
+      drawLevels(R(g, y, lw, bh));
+      (S.find ? drawFinder : drawTranscript)(R(2 * g + lw, y, W - 3 * g - lw, bh));
+    }
+    return;
+  }
   if (W >= H * 1.15) {
     const lw = W * 0.64, x1 = lw + g / 2, cw = W - x1 - g;
     drawCamera(R(g, g, lw - 1.5 * g, H - 2 * g));
@@ -2598,10 +2875,16 @@ setInterval(() => {
   busyAt = now;
   let s = `${APP_VERSION} · ${conn ? `${conn.name} · ${connState}` : "not connected"}`;
   if (conn && (connState === "streaming" || conn instanceof DemoConn)) {
-    s += ` · ${(pk * 128 / 1000).toFixed(1)} k samples/s · camera ${fps.toFixed(0)} fps`;
-    // shown here vs arrived over USB vs what the board says it sent: tells where frames get lost
-    const bs = /([\d.]+) camera fps, (\d+) frames skipped, (\d+) mic packets dropped/.exec(boardStats);
-    s += ` (got ${rx.toFixed(0)}, board sent ${bs ? `${(+bs[1]).toFixed(0)}, skipped ${bs[2]}, mic drops ${bs[3]}` : "?"})`;
+    s += ` · ${(pk * 128 / 1000).toFixed(1)} k samples/s`;
+    if (S.camOff) {
+      s += boardStats.startsWith("camera off") ? " · camera off (board too)"
+        : rx > 0.5 && !(conn instanceof DemoConn) ? " · camera off here; the board keeps sending it (v4 firmware turns it off)" : " · camera off";
+    } else {
+      s += ` · camera ${fps.toFixed(0)} fps`;
+      // shown here vs arrived over USB vs what the board says it sent: tells where frames get lost
+      const bs = /([\d.]+) camera fps, (\d+) frames skipped, (\d+) mic packets dropped/.exec(boardStats);
+      s += ` (got ${rx.toFixed(0)}, board sent ${bs ? `${(+bs[1]).toFixed(0)}, skipped ${bs[2]}, mic drops ${bs[3]}` : "?"})`;
+    }
     if (decodeErrors || decodeFails) s += ` · bad JPEG ${decodeErrors}/${decodeFails}`;
     s += ` · USB ${kbs.toFixed(0)} kB/s${perRead ? ` (${(perRead / 1024).toFixed(0)}/${((conn.size || 0) / 1024).toFixed(0)} KB per read)` : ""} · load ${load.toFixed(0)}%`;
     if (streamMask !== 0xff) {
@@ -2629,6 +2912,11 @@ setInterval(() => {
   // Chrome's Web Serial on macOS loses 0xFF bytes (camera frames break, mic packets go missing), so ask the
   // board for a stream without any. Boards that don't know 'x' ignore it.
   if (conn instanceof SerialConn && connState === "streaming") conn.send(new Uint8Array([120]));  // 'x'
+  // camera off: the board shuts it down while 'c' keeps coming (v4 firmware; older boards ignore it)
+  if (conn && !(conn instanceof DemoConn) && connState === "streaming") {
+    if (S.camOff) conn.send(new Uint8Array([99]));  // 'c'
+    else if (boardStats.startsWith("camera off")) conn.send(new Uint8Array([67]));  // 'C'
+  }
   if (!(conn instanceof UsbConn) || connState !== "streaming" || model.total < FS) return;
   let mask = 0;
   for (const ch of model.chans) mask |= 1 << ch;
@@ -2671,6 +2959,8 @@ function uiSync() {
   $("findmode").classList.toggle("hidden", !S.find);
   $("findmode").value = S.findMode;
   $("focus").classList.toggle("on", S.focus);
+  $("cam").classList.toggle("on", !S.camOff);
+  $("cam").textContent = S.camOff ? "Camera off" : "Camera";
   $("swaplr").classList.toggle("on", S.swap);
   $("swapfb").classList.toggle("on", S.swapfb);
   $("mirror").classList.toggle("on", S.mirror);
@@ -2762,9 +3052,24 @@ function calShow(res = null) {
     (S.kel !== 1 ? ` · height ×${S.kel.toFixed(2)}` : "") +
     (dists > 1 ? ` · camera ${cm(S.camX, "left", "right")}, ${cm(S.camZ, "up", "down")} of the mics` : "");
 }
+function setCam(off) {
+  S.camOff = off;
+  if (off) {
+    if (cal.on) setCal(false);
+    image?.close?.();
+    image = null;
+    pendingJpeg = null;
+  }
+  if (conn && connState === "streaming") conn.send(new Uint8Array([off ? 99 : 67])).catch(() => {});  // 'c' / 'C'
+  hint(off ? "Camera off: the tablet stops decoding the picture (the board shuts its camera down with v4 firmware)"
+    : "Camera on");
+  save();
+  uiSync();
+}
 function setCal(on) {
   cal.on = on;
   if (on) {
+    if (S.camOff) setCam(false);  // calibrating needs the picture
     if (S.find) setFind(false);
     beacon.reset();
     model.dets = [];
@@ -2816,6 +3121,7 @@ function calCapture() {
   uiSync();
 }
 $("calib").onclick = () => setCal(!cal.on);
+$("cam").onclick = () => setCam(!S.camOff);
 $("caldone").onclick = () => setCal(false);
 $("calgrab").onclick = calCapture;
 $("caltarget").onchange = (e) => { cal.target = +e.target.value; cal.custom = null; cal.since = model.now; };
