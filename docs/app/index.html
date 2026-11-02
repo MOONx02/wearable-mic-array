@@ -18,6 +18,8 @@
   #bar .grow { flex: 1; }
   button, select { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
     padding: 8px 12px; font: inherit; }
+  a.btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
+    padding: 8px 12px; text-decoration: none; }
   button.on { background: #1f6feb; border-color: #58a6ff; }
   button.rec.on { background: #da3633; border-color: #ff7b72; }
   button:disabled { opacity: 0.45; }
@@ -67,15 +69,17 @@
   <label>View <input id="fov" type="number" min="20" max="140" step="1">°</label>
   <label>Trigger <input id="thr" type="range" min="4" max="30" step="1"> <span id="thrv"></span></label>
   <button id="rec" class="rec" title="Record to the board's microSD card">● Rec SD</button>
+  <a class="btn" href="update.html" title="Flash new firmware onto the board over USB">Update firmware</a>
 </div>
 <div id="status"><span id="hint">Clap ahead → Set centre · clap at the right edge → Right edge</span><span id="conn">not connected</span></div>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div id="connect">
     <h1>Mic array 360</h1>
-    <p>Plug the ESP32-S3 (cam_mic_record8 firmware) into this device's USB-C port, then tap Connect and pick the board.</p>
+    <p>Plug the ESP32-S3 (cam_mic_vest6 firmware) into this device's USB-C port, then tap Connect and pick the board.</p>
     <button id="go" class="big on">Connect USB</button>
     <button id="demo">Demo (no board)</button>
+    <a class="btn" href="update.html">Update the board's firmware</a>
     <p id="why"></p>
   </div>
 </div>

@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>Update the board's firmware</title>
+<link rel="icon" href="icon-192.png">
+<style>
+  html, body { margin: 0; background: #0d1117; color: #e6edf3;
+    font: 15px -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: calc(14px + env(safe-area-inset-top)) 16px 40px; }
+  h1 { font-size: 22px; margin: 6px 0 14px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: #8b949e; font-weight: 600; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .dim { color: #8b949e; }
+  ol { margin: 0; padding-left: 20px; line-height: 1.6; }
+  label { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; }
+  button, select, a.btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
+    padding: 8px 12px; font: inherit; text-decoration: none; }
+  button.big { font-size: 18px; padding: 14px 28px; background: #1f6feb; border-color: #58a6ff; }
+  button:disabled { opacity: 0.45; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  progress { width: 100%; height: 18px; accent-color: #3fb950; }
+  #log { background: #010409; border: 1px solid #30363d; border-radius: 8px; padding: 8px 10px; height: 180px;
+    overflow: auto; font: 12px ui-monospace, Menlo, monospace; white-space: pre-wrap; color: #8b949e; }
+  #result { font-weight: 600; min-height: 1.3em; }
+  #result.ok { color: #3fb950; }
+  #result.err { color: #ff7b72; }
+  code { background: #21262d; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row"><a class="btn" href="./">◀ Back to the app</a></div>
+  <h1>Update the board's firmware</h1>
+
+  <div class="card">
+    <h2>Firmware</h2>
+    <label><input type="radio" name="src" value="builtin" checked>
+      <span><b id="fwname">cam_mic_vest6</b> <span id="fwmeta" class="dim">(loading…)</span><br>
+      <span id="fwabout" class="dim"></span></span></label>
+    <label><input type="radio" name="src" value="file">
+      <span>A <code>.bin</code> file from this device<br>
+      <span class="dim">An app image (<code>sketch.ino.bin</code>, written at 0x10000) or a merged image
+        (<code>sketch.ino.merged.bin</code>, written at 0x0)</span><br>
+      <input id="file" type="file" accept=".bin"></span></label>
+  </div>
+
+  <div class="card">
+    <h2>Steps</h2>
+    <ol>
+      <li>If the Mic array app is connected to the board, tap <b>✕</b> there first: only one page can use the USB port.</li>
+      <li>Plug the board into this device's USB port.</li>
+      <li>Tap <b>Flash</b> and pick the board (it shows as <i>USB JTAG/serial debug unit</i> or <i>ESP32-S3</i>).</li>
+      <li>Wait for “Done” (about half a minute), then go back to the app and tap Connect USB.</li>
+    </ol>
+  </div>
+
+  <div class="row">
+    <button id="flash" class="big">Flash</button>
+    <label class="dim" style="margin:0">USB method
+      <select id="method">
+        <option value="auto">automatic</option>
+        <option value="serial">Web Serial</option>
+        <option value="usb">WebUSB</option>
+      </select></label>
+  </div>
+  <p id="result"></p>
+  <progress id="bar" max="1" value="0"></progress>
+  <div id="log"></div>
+
+  <div class="card dim">
+    <h2>If it can't connect</h2>
+    Hold the board's <b>BOOT</b> button, press and let go of <b>RESET</b> (or unplug and replug it while holding
+    BOOT), let go of BOOT, and tap Flash again. After flashing that way, press RESET once so the new firmware starts.
+    If the other USB method is offered, try it too.
+  </div>
+</main>
+
+<script type="module">
+import { ESPLoader, Transport } from "./lib/esptool.js";
+
+const $ = (id) => document.getElementById(id);
+const VIDS = [0x303a, 0x2886];
+const android = /Android/i.test(navigator.userAgent);
+let manifest = null;
+
+const log = (t) => {
+  const el = $("log");
+  el.textContent += t;
+  el.scrollTop = el.scrollHeight;
+};
+const result = (t, cls = "") => { $("result").textContent = t; $("result").className = cls; };
+
+// SerialPort look-alike over WebUSB for the ESP32-S3's built-in USB serial, for Android Chrome (which may
+// not offer Web Serial). The same interfaces the app's WebUSB connection uses; DTR/RTS (which esptool
+// uses to put the chip in download mode) go out as CDC SET_CONTROL_LINE_STATE.
+class UsbSerialPort {
+  constructor(dev) {
+    this.dev = dev;
+    this.readable = null;
+    this.dtr = false;
+    this.rts = false;
+  }
+  getInfo() { return { usbVendorId: this.dev.vendorId, usbProductId: this.dev.productId }; }
+  async open() {
+    const d = this.dev;
+    if (!d.opened) await d.open();
+    if (!d.configuration) await d.selectConfiguration(1);
+    let data = null, comm = null;
+    for (const itf of d.configuration.interfaces) {
+      for (const alt of itf.alternates) {
+        if (alt.interfaceClass === 10 && !data) {
+          const i = alt.endpoints.find((e) => e.direction === "in" && e.type === "bulk");
+          const o = alt.endpoints.find((e) => e.direction === "out" && e.type === "bulk");
+          if (i && o) data = { n: itf.interfaceNumber, inEp: i.endpointNumber, outEp: o.endpointNumber };
+        }
+        if (alt.interfaceClass === 2 && comm === null) comm = itf.interfaceNumber;
+      }
+    }
+    if (!data) throw new Error("this USB device has no serial interface");
+    if (comm !== null) {
+      try { await d.claimInterface(comm); } catch (e) { /* optional */ }
+    }
+    await d.claimInterface(data.n);
+    this.data = data;
+    this.comm = comm;
+    if (comm !== null) {
+      try {  // SET_LINE_CODING 115200 8N1
+        await d.controlTransferOut({ requestType: "class", recipient: "interface", request: 0x20, value: 0, index: comm },
+                                   new Uint8Array([0x00, 0xc2, 0x01, 0x00, 0x00, 0x00, 0x08]));
+      } catch (e) { /* optional */ }
+    }
+    this.closed = false;
+    this.readable = new ReadableStream({
+      pull: async (ctl) => {
+        for (;;) {
+          if (this.closed) { ctl.close(); return; }
+          const r = await d.transferIn(data.inEp, 16384);
+          if (r.status === "stall") { await d.clearHalt("in", data.inEp); continue; }
+          if (r.data && r.data.byteLength) {
+            ctl.enqueue(new Uint8Array(r.data.buffer.slice(r.data.byteOffset, r.data.byteOffset + r.data.byteLength)));
+            return;
+          }
+        }
+      },
+    });
+  }
+  // a fresh stream each time, since esptool closes the writer to flush
+  get writable() {
+    if (this.closed || !this.dev.opened || !this.data) return null;
+    return new WritableStream({ write: async (chunk) => { await this.dev.transferOut(this.data.outEp, chunk); } });
+  }
+  async setSignals(s) {
+    if (s.dataTerminalReady !== undefined) this.dtr = s.dataTerminalReady;
+    if (s.requestToSend !== undefined) this.rts = s.requestToSend;
+    if (this.comm === null) return;
+    await this.dev.controlTransferOut({ requestType: "class", recipient: "interface", request: 0x22,
+                                        value: (this.dtr ? 1 : 0) | (this.rts ? 2 : 0), index: this.comm });
+  }
+  async close() {
+    this.closed = true;
+    this.readable = null;
+    try { await this.dev.close(); } catch (e) { /* already gone */ }
+  }
+}
+
+async function pickPort() {
+  const m = $("method").value;
+  const useUsb = m === "usb" || (m === "auto" && (android || !("serial" in navigator)) && "usb" in navigator);
+  if (useUsb) {
+    const dev = await navigator.usb.requestDevice({ filters: VIDS.map((v) => ({ vendorId: v })) });
+    return new UsbSerialPort(dev);
+  }
+  if (!("serial" in navigator)) throw new Error("this browser has no USB access: use Chrome or Edge");
+  return navigator.serial.requestPort({ filters: VIDS.map((v) => ({ usbVendorId: v })) });
+}
+
+function md5(bytes) {
+  const S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+  const K = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0);
+  const n = bytes.length, total = (((n + 8) >> 6) + 1) << 6, buf = new Uint8Array(total);
+  buf.set(bytes);
+  buf[n] = 0x80;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(total - 8, (n * 8) >>> 0, true);
+  dv.setUint32(total - 4, Math.floor(n / 0x20000000), true);
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  const M = new Uint32Array(16);
+  for (let off = 0; off < total; off += 64) {
+    for (let i = 0; i < 16; i++) M[i] = dv.getUint32(off + 4 * i, true);
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16) { F = (B & C) | (~B & D); g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) & 15; }
+      else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) & 15; }
+      else { F = C ^ (B | ~D); g = (7 * i) & 15; }
+      F = (F + A + K[i] + M[g]) | 0;
+      A = D; D = C; C = B;
+      const s = S[(i >> 4) * 4 + (i & 3)];
+      B = (B + ((F << s) | (F >>> (32 - s)))) | 0;
+    }
+    a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+  }
+  const out = new DataView(new ArrayBuffer(16));
+  [a0, b0, c0, d0].forEach((v, i) => out.setUint32(4 * i, v >>> 0, true));
+  return Array.from(new Uint8Array(out.buffer), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function builtinParts() {
+  if (!manifest) throw new Error("the built-in firmware didn't load: check the connection and reload this page");
+  const parts = [];
+  for (const p of manifest.parts) {
+    const r = await fetch(`firmware/${p.file}`, { cache: "no-cache" });
+    if (!r.ok) throw new Error(`couldn't download firmware/${p.file}`);
+    const data = new Uint8Array(await r.arrayBuffer());
+    if (data.length !== p.size || md5(data) !== p.md5) throw new Error(`firmware/${p.file} is damaged: reload this page`);
+    parts.push({ data, address: p.address, name: p.file });
+  }
+  return parts;
+}
+
+// An app image goes at 0x10000; a merged image (bootloader + partition table at 0x8000 + app) at 0x0,
+// with the blank padding at the end left off.
+async function fileParts() {
+  const f = $("file").files[0];
+  if (!f) throw new Error("pick a .bin file first");
+  let data = new Uint8Array(await f.arrayBuffer());
+  if (data[0] !== 0xe9) throw new Error(`${f.name} isn't an ESP32 firmware image`);
+  const merged = data.length > 0x10000 && data[0x8000] === 0xaa && data[0x8001] === 0x50;
+  if (merged) {
+    let end = data.length;
+    while (end > 0x10000 && data[end - 1] === 0xff) end--;
+    data = data.slice(0, (end + 3) & ~3);
+  }
+  return [{ data, address: merged ? 0 : 0x10000, name: f.name }];
+}
+
+async function flash() {
+  $("flash").disabled = true;
+  $("log").textContent = "";
+  $("bar").value = 0;
+  result("");
+  let transport = null, lock = null;
+  try {
+    const parts = document.querySelector("input[name=src]:checked").value === "file" ? await fileParts() : await builtinParts();
+    const port = await pickPort();
+    try { lock = await navigator.wakeLock?.request("screen"); } catch (e) { /* not offered */ }
+    transport = new Transport(port, false);
+    const loader = new ESPLoader({
+      transport, baudrate: 115200,
+      terminal: { clean() {}, writeLine: (t) => log(t + "\n"), write: (t) => log(t) },
+    });
+    result("Connecting to the board…");
+    const chip = await loader.main();
+    if (!/ESP32-S3/i.test(chip)) throw new Error(`that's a ${chip}, not the ESP32-S3`);
+    const total = parts.reduce((s, p) => s + p.data.length, 0);
+    const done = parts.map(() => 0);
+    result(`Writing ${(total / 1024).toFixed(0)} KB…`);
+    await loader.writeFlash({
+      fileArray: parts.map((p) => ({ data: p.data, address: p.address })),
+      flashSize: "keep", flashMode: "keep", flashFreq: "keep", eraseAll: false, compress: true,
+      reportProgress: (i, written, size) => {
+        done[i] = size ? (written / size) * parts[i].data.length : 0;
+        $("bar").value = done.reduce((s, v) => s + v, 0) / total;
+      },
+      calculateMD5Hash: md5,
+    });
+    $("bar").value = 1;
+    // esptool-js's hard reset only lets go of RTS, so the chip never restarts and stays in the flasher;
+    // pulse it as esptool.py does (DTR low, so it boots the new firmware rather than download mode)
+    log("Restarting the board…\n");
+    await transport.setDTR(false);
+    await transport.setRTS(true);
+    await new Promise((r) => setTimeout(r, 150));
+    await transport.setRTS(false);
+    const what = document.querySelector("input[name=src]:checked").value === "file"
+      ? parts[0].name : `${manifest.name} v${manifest.version}`;
+    result(`Done: ${what} is on the board and it has restarted. Go back to the app and tap Connect USB ` +
+           `(no picture or sound there? unplug the board and plug it back in).`, "ok");
+  } catch (e) {
+    if (e.name === "NotFoundError") result("No board picked.");
+    else {
+      const busy = /open|claim|InvalidStateError|NetworkError|Access denied/i.test(`${e.name} ${e.message}`);
+      result(`Couldn't flash: ${e.message}` + (busy ? " · Is the app (or another tab) still connected? Tap ✕ there and try again." : ""), "err");
+      log(`\n${e.stack || e}\n`);
+    }
+  } finally {
+    try { await transport?.disconnect(); } catch (e) { /* already closed, e.g. the board restarted */ }
+    try { await lock?.release(); } catch (e) { /* gone */ }
+    $("flash").disabled = false;
+  }
+}
+
+$("flash").onclick = flash;
+$("file").onchange = () => { document.querySelector("input[value=file]").checked = true; };
+if (!("serial" in navigator) && !("usb" in navigator)) {
+  result(window.isSecureContext ? "This browser can't open USB devices: use Chrome (Android or desktop) or Edge."
+    : "USB needs a secure page: open this from its https:// address (or localhost).", "err");
+  $("flash").disabled = true;
+}
+fetch("firmware/manifest.json", { cache: "no-cache" })
+  .then((r) => r.json())
+  .then((m) => {
+    manifest = m;
+    $("fwname").textContent = m.name;
+    $("fwmeta").textContent = `version ${m.version} · built ${m.built.replace("T", " ").replace("Z", "")} UTC`;
+    $("fwabout").textContent = m.about || "";
+  })
+  .catch(() => { $("fwmeta").textContent = "(couldn't load: are you offline?)"; });
+</script>
+</body>
+</html>

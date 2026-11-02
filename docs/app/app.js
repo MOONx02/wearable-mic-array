@@ -7,26 +7,37 @@
 const FS = 16000, CH = 8, C = 343, SEG = 1024, NFFT = 2048, INTERP = 8;
 const BAND = [300, 6000], HOLD_S = 2.5, HISTORY_S = 10, BEHIND_DEG = 135, FB_SURE = 0.25;
 const DEAD_PTP = 8, STUCK_FRACTION = 0.5, CAPTION_HOLD_S = 9;
+// 150 Hz Butterworth high-pass (b0, b1, b2, a1, a2) for the levels and the trigger
+const HP = (() => {
+  const w = (2 * Math.PI * 150) / FS, cw = Math.cos(w), al = Math.sin(w) / Math.SQRT2, a0 = 1 + al;
+  return [(1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0, (-2 * cw) / a0, (1 - al) / a0];
+})();
+// elevations searched when the mics aren't all at one height (degrees; talkers' faces are above the chest)
+const ELEV = [-30, -20, -10, 0, 10, 20, 30, 40, 50, 60];
 const VIDS = [0x303a, 0x2886];
 const COLORS = ["#58a6ff", "#f0883e", "#3fb950", "#d2a8ff", "#ff7b72", "#e3b341", "#79c0ff", "#56d4dd"];
 const BG = "#0d1117", PANEL = "#161b22", EDGE = "#30363d", INK = "#e6edf3", DIM = "#8b949e";
 const GLOW = "#ffa657", LOUD = "#ff7b72", SPEAKER = "#58a6ff";
 
-// channel: [name, x mm toward the wearer's left, y mm toward the front]
+// channel: [name, x mm toward the wearer's left, y mm toward the front, z mm up (optional)]
 const FRONT = { 0: ["front outer L", 68.6, 22], 1: ["front outer R", -68.6, 22],
                 2: ["front inner L", 22.9, 22], 3: ["front inner R", -22.9, 22] };
+// cam_mic_vest6: the chest plate's row of four with a pair 60 mm above the inner two
+const VEST6 = { 0: ["inner R", -22.9, 0, 0], 1: ["inner L", 22.9, 0, 0], 2: ["outer R", -68.6, 0, 0],
+                3: ["outer L", 68.6, 0, 0], 4: ["top R", -22.9, 0, 60], 5: ["top L", 22.9, 0, 60] };
 const PRESETS = {
+  vest6: { name: "6 mics: vest chest, 4 in a row + 2 above", geom: VEST6 },
   rear5: { name: "5 mics: 4 front + rear centre", geom: { ...FRONT, 4: ["rear centre", 0, -22] } },
   six: { name: "6 mics: 4 front + 2 back", geom: { ...FRONT, 5: ["back R", -68.6, -22], 7: ["back L", 68.6, -22] } },
   front4: { name: "4 front mics (no front/back)", geom: { ...FRONT } },
 };
 
-const S = Object.assign({ layout: "rear5", hfov: 60, offset: 0, swap: false, swapfb: false, rotate: 0,
+const S = Object.assign({ layout: "vest6", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
                           mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow" },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
 if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
-if (!PRESETS[S.layout]) S.layout = "rear5";
+if (!PRESETS[S.layout]) S.layout = "vest6";
 const save = () => localStorage.setItem("mic360", JSON.stringify(S));
 const wrap = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -75,6 +86,10 @@ class Model {
   constructor() {
     this.N = FS * 2;
     this.x = Array.from({ length: CH }, () => new Float32Array(this.N));
+    // the same above 150 Hz, for the levels and the trigger: body thumps, footsteps and room rumble sit
+    // below that and would otherwise move every mic at once (direction finding only looks above 300 Hz)
+    this.xh = Array.from({ length: CH }, () => new Float32Array(this.N));
+    this.hp = Array.from({ length: CH }, () => new Float64Array(4));
     this.wp = 0;
     this.total = 0;
     this.dc = new Float64Array(CH);
@@ -103,18 +118,23 @@ class Model {
       for (let i = 0; i < frames; i++) m += s[i * CH + c];
       m /= frames;
       this.dc[c] = this.total === 0 ? m : 0.95 * this.dc[c] + 0.05 * m;
-      const d = this.dc[c], buf = this.x[c];
-      let w = this.wp;
+      const d = this.dc[c], buf = this.x[c], hb = this.xh[c], z = this.hp[c];
+      let w = this.wp, [x1, x2, y1, y2] = z;
       for (let i = 0; i < frames; i++) {
-        buf[w] = s[i * CH + c] - d;
+        const v = s[i * CH + c] - d;
+        buf[w] = v;
+        const y = HP[0] * v + HP[1] * x1 + HP[2] * x2 - HP[3] * y1 - HP[4] * y2;
+        x2 = x1; x1 = v; y2 = y1; y1 = y;
+        hb[w] = y;
         if (++w === this.N) w = 0;
       }
+      z[0] = x1; z[1] = x2; z[2] = y1; z[3] = y2;
     }
     this.wp = (this.wp + frames) % this.N;
     this.total += frames;
   }
-  tail(c, n, out) {
-    const buf = this.x[c];
+  tail(c, n, out, src = this.x) {
+    const buf = src[c];
     let r = (this.wp - n + this.N) % this.N;
     for (let i = 0; i < n; i++) {
       out[i] = buf[r];
@@ -127,7 +147,7 @@ class Model {
     if (this.total < FS / 10) return;
     this.ticks = (this.ticks || 0) + 1;
     for (let c = 0; c < CH; c++) {
-      const blk = this.tail(c, 800, this.blk);
+      const blk = this.tail(c, 800, this.blk, this.xh);
       let m = 0;
       for (let i = 0; i < 800; i++) m += blk[i];
       m /= 800;
@@ -177,24 +197,29 @@ class Model {
     const key = chans.join(",") + "@" + lo + "-" + top;
     let st = this.steer.get(key);
     if (st) return st;
-    const pos = chans.map((c) => [this.geom[c][1] / 1000, this.geom[c][2] / 1000]);
-    const xs = pos.map((p) => p[0]), ys = pos.map((p) => p[1]);
-    const ptpx = Math.max(...xs) - Math.min(...xs), ptpy = Math.max(...ys) - Math.min(...ys);
-    const m = (Math.ceil((Math.hypot(ptpx, ptpy) / C) * FS) + 2) * INTERP;
-    const t = pos.map(([x, y]) => {
-      const a = new Float64Array(360);
+    const pos = chans.map((c) => [this.geom[c][1] / 1000, this.geom[c][2] / 1000, (this.geom[c][3] || 0) / 1000]);
+    const ptp = (i) => Math.max(...pos.map((p) => p[i])) - Math.min(...pos.map((p) => p[i]));
+    const ptpx = ptp(0), ptpy = ptp(1), ptpz = ptp(2);
+    const m = (Math.ceil((Math.hypot(ptpx, ptpy, ptpz) / C) * FS) + 2) * INTERP;
+    // directions: 360 azimuths × the elevations (just 0° for a flat array), index k * nel + e
+    const els = ptpz > 0.01 ? ELEV : [0], nel = els.length, G = 360 * nel;
+    const t = pos.map(([x, y, z]) => {
+      const a = new Float64Array(G);
       for (let k = 0; k < 360; k++) {
         const th = ((k - 180) * Math.PI) / 180;
-        a[k] = -(x * Math.sin(th) + y * Math.cos(th)) / C;
+        for (let e = 0; e < nel; e++) {
+          const ph = (els[e] * Math.PI) / 180;
+          a[k * nel + e] = -((x * Math.sin(th) + y * Math.cos(th)) * Math.cos(ph) + z * Math.sin(ph)) / C;
+        }
       }
       return a;
     });
     const pairs = [];
     for (let i = 0; i < chans.length; i++) {
       for (let j = i + 1; j < chans.length; j++) {
-        const idx = new Int32Array(360);
-        for (let k = 0; k < 360; k++) {
-          idx[k] = Math.min(2 * m, Math.max(0, Math.round((t[j][k] - t[i][k]) * FS * INTERP) + m));
+        const idx = new Int32Array(G);
+        for (let g = 0; g < G; g++) {
+          idx[g] = Math.min(2 * m, Math.max(0, Math.round((t[j][g] - t[i][g]) * FS * INTERP) + m));
         }
         pairs.push([i, j, idx]);
       }
@@ -211,7 +236,7 @@ class Model {
         sinT[l * nb + b] = Math.sin(ph);
       }
     }
-    st = { pairs, m, L, k0, nb, cosT, sinT, hasBack: ptpy > 0.01 };
+    st = { pairs, m, L, k0, nb, cosT, sinT, hasBack: ptpy > 0.01, els, nel };
     this.steer.set(key, st);
     return st;
   }
@@ -238,7 +263,7 @@ class Model {
       re.push(r);
       im.push(i);
     }
-    const curve = new Float64Array(360), cc = new Float64Array(st.L);
+    const grid = new Float64Array(360 * st.nel), cc = new Float64Array(st.L);
     const gr = new Float64Array(st.nb), gi = new Float64Array(st.nb);
     for (const [i, j, idx] of st.pairs) {
       for (let b = 0; b < st.nb; b++) {
@@ -254,9 +279,9 @@ class Model {
         for (let b = 0; b < st.nb; b++) s += gr[b] * st.cosT[o + b] - gi[b] * st.sinT[o + b];
         cc[l] = s;
       }
-      for (let k = 0; k < 360; k++) curve[k] += cc[idx[k]];
+      for (let g = 0; g < grid.length; g++) grid[g] += cc[idx[g]];
     }
-    return curve;
+    return toAzimuth(grid, st);
   }
 
   // voice: someone is talking (voice focus says so), so search only the voice band, where the talker
@@ -269,6 +294,8 @@ class Model {
     for (const s of srcs) strength = Math.max(strength, this.level[s] - this.floor[s]);
     if (strength < thr) return;
     if (this.last && this.now - this.last.t < 0.08) return;
+    // where missing packets were joined up, every mic jumps at the same instant: not a sound
+    if (this.gapAt !== undefined && this.total - this.gapAt < SEG + 800) return;
     const st = this.steering(act.map((a) => a[0]), voice ? 3400 : BAND[1]);
     // while someone talks, show the whole phrase's direction (as the subtitles do), not one 64 ms snapshot
     const phrase = voice ? speechCurve() : null;
@@ -283,11 +310,29 @@ class Model {
   }
 }
 
-// Peak of an SRP curve: angle, spread (sigma) and how sure front vs back is (null without a back mic,
-// and then the angle is folded into the front half).
+// SRP over azimuth × elevation down to an azimuth curve: the cut through the peak's elevation, kept in
+// curve.el (degrees) when the array has height. (Each azimuth's best elevation instead would smear the
+// peak sideways, since tilting up and turning toward the row's end change the row's delays alike.)
+function toAzimuth(grid, st) {
+  if (st.nel === 1) return grid;
+  let g = 0;
+  for (let i = 1; i < grid.length; i++) if (grid[i] > grid[g]) g = i;
+  const e = g % st.nel, curve = new Float64Array(360);
+  for (let k = 0; k < 360; k++) curve[k] = grid[k * st.nel + e];
+  curve.el = st.els[e];
+  if (e > 0 && e < st.nel - 1) {  // parabola through the peak and its neighbours, between grid steps
+    const a = grid[g - 1], b = grid[g], c = grid[g + 1], den = a - 2 * b + c;
+    if (den < 0) curve.el += (0.5 * (a - c) / den) * (st.els[e + 1] - st.els[e]);
+  }
+  return curve;
+}
+
+// Peak of an SRP curve: angle, spread (sigma), elevation (null for a flat array) and how sure front vs
+// back is (null without a back mic, and then the angle is folded into the front half).
 function pick(curve, st) {
   let k = 0;
   for (let i = 1; i < 360; i++) if (curve[i] > curve[k]) k = i;
+  const elev = curve.el ?? null;
   let angle = k - 180;
   const peak = curve[k], sorted = Array.from(curve).sort((a, b) => a - b);
   const base = (sorted[179] + sorted[180]) / 2, span = Math.max(peak - base, 1e-9);
@@ -299,7 +344,7 @@ function pick(curve, st) {
   let fb = null;
   if (st.hasBack) fb = (peak - curve[(((Math.round(wrap(180 - angle)) + 180) % 360) + 360) % 360]) / span;
   else if (Math.abs(angle) > 90) angle = Math.sign(angle) * (180 - Math.abs(angle));
-  return { angle, sigma, fb };
+  return { angle, sigma, fb, elev };
 }
 
 // ------------------------------------------------------------------ Find mode: beacons and alarms
@@ -474,7 +519,7 @@ class Beacon {
       for (let n = 0; n < U; n++) ui[n] = -ui[n];
       ups.push([ur, ui]);
     }
-    const curve = new Float64Array(360), cc = new Float64Array(st.L);
+    const grid = new Float64Array(360 * st.nel), cc = new Float64Array(st.L);
     for (const [a, b, idx] of st.pairs) {
       const [ar, ai] = ups[a], [br, bi] = ups[b];
       for (let l = 0; l < st.L; l++) {
@@ -483,9 +528,9 @@ class Beacon {
         for (let q = Math.max(0, -lag); q < Math.min(U, U - lag); q++) s += br[q + lag] * ar[q] + bi[q + lag] * ai[q];
         cc[l] = s;
       }
-      for (let k = 0; k < 360; k++) curve[k] += cc[idx[k]];
+      for (let g = 0; g < grid.length; g++) grid[g] += cc[idx[g]];
     }
-    return curve;
+    return toAzimuth(grid, st);
   }
 
 }
@@ -612,6 +657,7 @@ class Alarm {
     for (let k = 0, at = from; k < 3 && (k === 0 || at <= upto); k++, at += 512) {
       const c = model.srp(srcs, st, Math.min(at, upto));
       for (let i = 0; i < 360; i++) curve[i] += c[i];
+      if (k === 0 && c.el !== undefined) curve.el = c.el;
     }
     const start = from;
     return { t: model.now, at: start / FS, ...pick(curve, st), strength: 0, curve, n: act.length, kind: "alarm", freq: f, level, score: 1 };
@@ -698,11 +744,15 @@ class Parser {
 
 // ------------------------------------------------------------------ connections
 
+// ~4 s of stream: a busy moment on the page must not back up into the board, which then drops mic
+// packets and camera frames
+const SERIAL_BUFFER = 1 << 20;
+
 class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   constructor() { this.name = "USB serial"; }
   async open() {
     this.port = await navigator.serial.requestPort({ filters: VIDS.map((v) => ({ usbVendorId: v })) });
-    await this.port.open({ baudRate: 115200, bufferSize: 1 << 16 });
+    await this.port.open({ baudRate: 115200, bufferSize: SERIAL_BUFFER });
   }
   async reopen() {
     for (;;) {
@@ -712,7 +762,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
         const ports = await navigator.serial.getPorts();
         const p = ports.find((x) => VIDS.includes(x.getInfo().usbVendorId)) || this.port;
         try { await p.close(); } catch (e) { /* not open */ }
-        await p.open({ baudRate: 115200, bufferSize: 1 << 16 });
+        await p.open({ baudRate: 115200, bufferSize: SERIAL_BUFFER });
         this.port = p;
         return true;
       } catch (e) { /* board still resetting */ }
@@ -752,7 +802,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v13";
+const APP_VERSION = "v16";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -886,7 +936,8 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
   }
   next() {
     const ev = this.script[this.k++ % this.script.length];
-    if (ev[0] === "say" && this.clips[ev[1]]) return { sig: spatial(this.clips[ev[1]], ev[2], false, 2500, "rms"), gap: 0.9 * FS };
+    // talkers' mouths are about 20° above the chest at conversation distance
+    if (ev[0] === "say" && this.clips[ev[1]]) return { sig: spatial(this.clips[ev[1]], ev[2], false, 2500, "rms", 20), gap: 0.9 * FS };
     return { sig: this.clap(ev[ev.length - 1]), gap: 1.0 * FS };
   }
   run(onData, onState) {
@@ -1005,9 +1056,9 @@ function gauss() {
 const ffts = new Map();
 const fftOf = (n) => ffts.get(n) || (ffts.set(n, makeFFT(n)), ffts.get(n));
 
-// Mono signal arriving from angle ang at every mic in the current layout (fractional delays in the
-// frequency domain), scaled so its peak or active-speech RMS is `level`.
-function spatial(sig, ang, circular, level, by) {
+// Mono signal arriving from angle ang (and elevation el) at every mic in the current layout (fractional
+// delays in the frequency domain), scaled so its peak or active-speech RMS is `level`.
+function spatial(sig, ang, circular, level, by, el = 0) {
   const pad = circular ? 0 : 32, n = 1 << Math.ceil(Math.log2(sig.length + 2 * pad)), f = fftOf(n);
   const re = new Float64Array(n), im = new Float64Array(n);
   re.set(sig, pad);
@@ -1019,9 +1070,10 @@ function spatial(sig, ang, circular, level, by) {
   ref = by === "peak" ? ref : Math.sqrt(ref / Math.max(1, cnt));
   const gain = level / Math.max(ref, 1e-9) / n;
   f(re, im);
-  const th = (ang * Math.PI) / 180, ux = Math.sin(th), uy = Math.cos(th), out = { len: circular ? n : sig.length + pad };
-  for (const [ch, [, x, y]] of Object.entries(model.geom)) {
-    const delay = -((x / 1000) * ux + (y / 1000) * uy) / C, r = new Float64Array(n), i = new Float64Array(n);
+  const th = (ang * Math.PI) / 180, ph = (el * Math.PI) / 180, out = { len: circular ? n : sig.length + pad };
+  const ux = Math.sin(th) * Math.cos(ph), uy = Math.cos(th) * Math.cos(ph), uz = Math.sin(ph);
+  for (const [ch, [, x, y, z = 0]] of Object.entries(model.geom)) {
+    const delay = -((x / 1000) * ux + (y / 1000) * uy + (z / 1000) * uz) / C, r = new Float64Array(n), i = new Float64Array(n);
     for (let k = 0; k < n; k++) {
       const ph = -2 * Math.PI * ((k <= n / 2 ? k : k - n) * (FS / n)) * delay, c = Math.cos(ph), s = Math.sin(ph);
       r[k] = re[k] * c - im[k] * s;
@@ -1068,7 +1120,7 @@ function wavToFloat(buf) {
 
 const model = new Model();
 const beacon = new Beacon(), alarm = new Alarm();
-let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "";
+let conn = null, connState = "", wrongFirmware = false, boardStats = "", boardMsg = "", boardFw = "", fwLayoutDone = false;
 let image = null, decoding = 0, lastSeq = null, gaps = 0, decodeErrors = 0, decodeFails = 0, usbBytes = 0, usbReads = 0, pendingJpeg = null, streamMask = 0xff, maskAsks = 0;
 const pktTimes = [], frameTimes = [], rxTimes = [];
 const busy = { ms: 0 };  // main-thread time spent on our own work, for the load figure in the status line
@@ -1076,7 +1128,10 @@ const busy = { ms: 0 };  // main-thread time spent on our own work, for the load
 const parser = new Parser({
   mic(seq, frames, s, mask) {
     streamMask = mask;
-    if (lastSeq !== null && seq !== ((lastSeq + 1) >>> 0)) gaps++;
+    if (lastSeq !== null && seq !== ((lastSeq + 1) >>> 0)) {
+      gaps++;
+      model.gapAt = model.total;
+    }
     lastSeq = seq;
     model.push(s, frames);
     if (cap.on) runFocus(s, frames);
@@ -1108,7 +1163,21 @@ const parser = new Parser({
   },
   status(msg) {
     if (msg.startsWith("stats: ")) boardStats = msg.slice(7);
-    else boardMsg = msg;
+    else if (msg.startsWith("firmware: ")) {
+      boardFw = msg.slice(10);
+      // the board says which mics it has: switch to that layout once per connection, so it can still be changed
+      const lay = /layout (\w+)/.exec(boardFw)?.[1];
+      if (lay && PRESETS[lay] && !fwLayoutDone) {
+        fwLayoutDone = true;
+        if (S.layout !== lay) {
+          S.layout = lay;
+          model.setGeom(PRESETS[lay].geom);
+          save();
+          uiSync();
+          hint(`Layout set from the board: ${PRESETS[lay].name}.`);
+        }
+      }
+    } else boardMsg = msg;
   },
 });
 
@@ -1119,6 +1188,12 @@ const orient = (a) => {
 const sideText = (rel) => Math.abs(rel) < 2 ? "straight ahead" : Math.abs(rel) > 178 ? "directly behind"
   : `${Math.abs(rel).toFixed(0)}° ${rel > 0 ? "left" : "right"}`;
 const fbText = (d) => d.fb === null ? "front/back unknown (no back mic)" : d.fb >= FB_SURE ? "front/back sure" : "front/back unsure";
+// height from the raised mics, relative to the camera's centre (Set centre); null for a flat array
+const upText = (d) => {
+  if (d.elev === null || d.elev === undefined) return null;
+  const e = d.elev - S.tilt;
+  return Math.abs(e) < 5 ? "level" : `${Math.abs(e).toFixed(0)}° ${e > 0 ? "up" : "down"}`;
+};
 
 // ------------------------------------------------------------------ voice focus (StreamingFocus from mic_caption_view.py)
 
@@ -1377,18 +1452,32 @@ function trackSpeechDir(weight) {
   const curve = new Float32Array(360);
   for (let k = 0; k < 360; k++) curve[k] = (weight * (c[k] - med)) / span;
   const t = asr.fed / FS;
-  utt.log.push({ t, curve, back: st.hasBack });
+  utt.log.push({ t, curve, el: c.el ?? null, back: st.hasBack });
   while (utt.log.length && t - utt.log[0].t > 60) utt.log.shift();
 }
 
+// The phrase's direction curve; with a tall array, sum.el is the elevation of the frames that point the
+// phrase's way, each weighted by how strongly it does.
 function speechCurve(t0 = utt.lastEnd, t1 = Infinity) {
-  const sum = new Float64Array(360);
+  const sum = new Float64Array(360), used = [];
   let n = 0, back = true;
   for (const e of utt.log) {
     if (e.t < t0 || e.t > t1) continue;
     for (let k = 0; k < 360; k++) sum[k] += e.curve[k];
+    if (e.el !== null) used.push(e);
     back = e.back;
     n++;
+  }
+  if (used.length) {
+    let k = 0;
+    for (let i = 1; i < 360; i++) if (sum[i] > sum[k]) k = i;
+    let es = 0, ws = 0;
+    for (const e of used) {
+      const w = Math.max(0, e.curve[k]);
+      es += w * e.el;
+      ws += w;
+    }
+    sum.el = ws > 0 ? es / ws : used[used.length - 1].el;
   }
   return { sum, n, back };
 }
@@ -1704,6 +1793,7 @@ function drawCamera(r) {
   ctx.clip();
   const half = S.hfov / 2, f = pic.w / 2 / Math.tan((half * Math.PI) / 180);
   const xOf = (rel) => pic.cx - f * Math.tan((Math.max(-89, Math.min(89, rel)) * Math.PI) / 180);
+  const yOf = (el) => pic.cy - f * Math.tan((Math.max(-80, Math.min(80, el)) * Math.PI) / 180);
   // ruler
   ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
   ctx.fillRect(pic.x, pic.b - 24, pic.w, 24);
@@ -1736,11 +1826,19 @@ function drawCamera(r) {
       ctx.moveTo(x, pic.y);
       ctx.lineTo(x, pic.b);
       ctx.stroke();
+      if (d.elev !== null && d.elev !== undefined) {  // the raised mics give its height: ring at that spot
+        const y = Math.max(pic.y + 16, Math.min(pic.b - 40, yOf(d.elev - S.tilt)));
+        ctx.beginPath();
+        ctx.arc(x, y, latest ? 16 : 10, 0, 2 * Math.PI);
+        ctx.strokeStyle = alpha(color, (latest ? 1 : 0.6) * fade);
+        ctx.lineWidth = latest ? 4 : 2;
+        ctx.stroke();
+      }
       if (latest) {
-        const near = Math.abs(rel) + d.sigma > half;
+        const near = Math.abs(rel) + d.sigma > half, up = upText(d);
         labelBox(x + 14, pic.y + 0.16 * pic.h, [
           `${d.kind ? KINDS[d.kind].name : `${d.strength > 30 ? "LOUD · " : ""}Sound`} · ${near ? "near the edge" : "in view"}`,
-          `${sideText(rel)} · ±${d.sigma.toFixed(0)}° · ${d.kind === "alarm" ? `${(d.freq / 1000).toFixed(1)} kHz tone`
+          `${sideText(rel)}${up ? ` · ${up}` : ""} · ±${d.sigma.toFixed(0)}° · ${d.kind === "alarm" ? `${(d.freq / 1000).toFixed(1)} kHz tone`
             : d.kind ? `${(100 * d.score).toFixed(0)}% match` : `${d.strength.toFixed(0)} dB over quiet`}`,
           `${(now - d.t).toFixed(1)} s ago · ${fbText(d)}`], color, pic);
       }
@@ -1768,7 +1866,8 @@ function drawSideArrow(pic, rel, d, fade, color, behind, half) {
   ctx.lineTo(x + s * 34, y + 24);
   ctx.closePath();
   ctx.fill();
-  const lines = [`${sideText(rel)} · ${behind ? "behind you" : "in front"}`, `±${d.sigma.toFixed(0)}° · ${fbText(d)}`];
+  const up = upText(d);
+  const lines = [`${sideText(rel)}${up ? ` · ${up}` : ""} · ${behind ? "behind you" : "in front"}`, `±${d.sigma.toFixed(0)}° · ${fbText(d)}`];
   ctx.font = font(14, true);
   const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 22;
   labelBox(left ? x + 44 : x - 44 - w, y - 26, lines, color, pic);
@@ -1894,12 +1993,19 @@ function drawGauge(r) {
   const maxd = Math.max(1, ...Object.values(model.geom).map(([, x, y]) => Math.hypot(x, y)));
   const scale = (0.22 * rad) / maxd;
   model.chans.forEach((ch, k) => {
-    const [, x, y] = model.geom[ch];
-    const mx = S.swap ? -x : x, my = S.swapfb ? -y : y;
+    const [, x, y, z] = model.geom[ch];
+    const mx = S.swap ? -x : x, my = S.swapfb ? -y : y, col = model.source(ch) !== null ? COLORS[k % COLORS.length] : "#484f58";
     ctx.beginPath();
-    ctx.arc(cx - mx * scale, cy - my * scale, 4.5, 0, 2 * Math.PI);
-    ctx.fillStyle = model.source(ch) !== null ? COLORS[k % COLORS.length] : "#484f58";
-    ctx.fill();
+    if (z > 0) {  // raised mic, seen from above over the one below it: a ring
+      ctx.arc(cx - mx * scale, cy - my * scale, 8, 0, 2 * Math.PI);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    } else {
+      ctx.arc(cx - mx * scale, cy - my * scale, 4.5, 0, 2 * Math.PI);
+      ctx.fillStyle = col;
+      ctx.fill();
+    }
   });
   const now = model.now;
   for (const d of model.dets) {
@@ -1945,7 +2051,8 @@ function drawGauge(r) {
     const rel = wrap(a - S.offset);
     const whereTxt = Math.abs(rel) <= S.hfov / 2 ? "in view" : Math.abs(a) > 90 ? "behind" : "off screen";
     text(`${sideText(a)} · ${whereTxt}`, r.cx, r.y + 42, 19, INK, "center", true);
-    text(`${fbText(d)} · ${d.n} mics`, r.cx, r.y + 62, 12, DIM, "center", false, true);
+    const up = upText(d);
+    text(`${up ? `${up} · ` : ""}${fbText(d)} · ${d.n} mics`, r.cx, r.y + 62, 12, DIM, "center", false, true);
   } else {
     const idle = { follow: "listening for the leader…", alarm: "listening for an alarm…", evac: "listening for exit and danger tones…" };
     text(S.find ? idle[S.findMode] : "clap, snap or talk", r.cx, r.y + 46, 15, DIM, "center");
@@ -1969,13 +2076,15 @@ function drawLevels(r) {
     ctx.fillStyle = "#21262d";
     ctx.fill();
     const src = model.source(ch);
+    const name = model.geom[ch][0];
     if (src === null) {
-      text("no signal", x0 + 8, y, 11, LOUD, "left", false, true);
+      text(`${name}: no signal`, x0 + 8, y, 11, LOUD, "left", false, true);
       return;
     }
     rrect(x0, y - bh / 2, Math.max(4, xf(model.level[src]) - x0), bh, 4);
     ctx.fillStyle = color;
     ctx.fill();
+    if (bh >= 11) text(name, x0 + 6, y, 10, INK, "left", true);
     const xn = xf(model.floor[src]);
     ctx.strokeStyle = DIM;
     ctx.setLineDash([3, 3]);
@@ -2201,23 +2310,25 @@ setInterval(() => {
     if (streamMask !== 0xff) {
       let k = 0;
       for (let c = 0; c < CH; c++) if (streamMask & (1 << c)) k++;
-      s += ` · ${k} of ${CH} mics over USB`;
+      s += ` · ${k} mics over USB`;
     } else if (maskAsks > 2) {
       s += ` · asked the board for fewer mics ${maskAsks}×, still getting all 8`;
     }
     if (gaps) s += ` · ${gaps} gaps`;
     if (pk === 0) s += " · no mic data yet";
   }
-  if (wrongFirmware) s += " · board is sending 4 mics: flash cam_mic_record8";
+  if (boardFw) s += ` · ${boardFw.split(" · ")[0]}`;
+  if (wrongFirmware) s += " · board is sending 4 mics: update it to cam_mic_vest6 (More → Update firmware)";
   if (boardMsg && !boardStats) s += ` · ${boardMsg}`;
   $("conn").textContent = s;
-  $("conn").title = boardStats || boardMsg;
+  $("conn").title = [boardFw, boardStats || boardMsg].filter(Boolean).join("\n");
 }, 500);
 
 // The tablet's USB link can't carry all eight mics plus the camera, so ask the board for just the mics
 // the layout uses (and any data-line partner standing in for a dead one). Repeated, because the board
 // goes back to all eight when the requests stop.
 setInterval(() => {
+  if (conn && !(conn instanceof DemoConn) && connState === "streaming" && !boardFw) conn.send(new Uint8Array([63]));  // '?': which firmware
   if (!(conn instanceof UsbConn) || connState !== "streaming" || model.total < FS) return;
   let mask = 0;
   for (const ch of model.chans) mask |= 1 << ch;
@@ -2289,8 +2400,11 @@ $("centre").onclick = () => {
   const a = lastAngle();
   if (a === null) return;
   S.offset = a;
+  const el = model.last.elev;
+  if (el !== null && el !== undefined) S.tilt = el;
   save();
-  hint(`Centre set: picture centre = ${a >= 0 ? "+" : ""}${a.toFixed(0)}° on the array.`);
+  hint(`Centre set: picture centre = ${a >= 0 ? "+" : ""}${a.toFixed(0)}° on the array` +
+       (el !== null && el !== undefined ? `, ${el.toFixed(0)}° up.` : "."));
 };
 $("edge").onclick = () => {
   const a = lastAngle();
@@ -2379,6 +2493,8 @@ async function connect(c) {
   }
   conn = c;
   wrongFirmware = false;
+  boardFw = "";
+  fwLayoutDone = false;
   lastSeq = null;
   gaps = 0;
   $("connect").classList.add("hidden");

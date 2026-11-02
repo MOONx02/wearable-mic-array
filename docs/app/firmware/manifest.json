@@ -1,0 +1,12 @@
+{
+  "name": "cam_mic_vest6",
+  "version": 2,
+  "built": "2026-11-02T19:41Z",
+  "about": "6 mics: D1 inner pair, D3 outer pair, D4 top pair (SEL 3V3 = right), clock D0, button D2",
+  "parts": [
+    {"file": "bootloader.bin", "address": 0, "size": 20224, "md5": "f72e32bb91fc9fbafd6022085eed7603"},
+    {"file": "partitions.bin", "address": 32768, "size": 3072, "md5": "801ba71678a964614657a6d8fbc6baca"},
+    {"file": "boot_app0.bin", "address": 57344, "size": 8192, "md5": "e6327541e2dc394ca2c3b3280ac0f39f"},
+    {"file": "cam_mic_vest6.bin", "address": 65536, "size": 446544, "md5": "c359f70afbeeeb52164d35ca0d4ebb39"}
+  ]
+}
