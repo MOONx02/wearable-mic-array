@@ -1031,7 +1031,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v23";
+const APP_VERSION = "v24";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -3300,7 +3300,7 @@ setInterval(() => {
     if (pk === 0) s += " · no mic data yet";
   }
   if (boardFw) s += ` · ${boardFw.split(" · ")[0]}`;
-  if (wrongFirmware) s += " · board is sending 4 mics: flash it with cam_mic_vest8";
+  if (wrongFirmware) s += " · board is sending 4 mics: update it to cam_mic_vest8 (More → Update firmware)";
   if (boardMsg && !boardStats) s += ` · ${boardMsg}`;
   $("conn").textContent = s;
   $("conn").title = [boardFw, boardStats || boardMsg].filter(Boolean).join("\n");

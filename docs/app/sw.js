@@ -1,11 +1,11 @@
 // Keeps the app usable with no internet. The speech models are not cached here: Vosk keeps its own copy
 // in IndexedDB, and Moonshine and Whisper go in the "transformers-cache" store after the first download.
-const CACHE = "mic360-v25";
+const CACHE = "mic360-v26";
 const CORE = ["./", "index.html", "beacon.html", "update.html", "app.js", "asr_worker.js", "lib/vosk.js",
               "lib/transformers.js", "lib/esptool.js", "manifest.json", "icon-192.png", "icon-512.png",
               "demo/tts_a1.wav", "demo/tts_a2.wav", "demo/tts_b1.wav",
               "firmware/manifest.json", "firmware/bootloader.bin", "firmware/partitions.bin",
-              "firmware/boot_app0.bin", "firmware/cam_mic_vest6.bin"];
+              "firmware/boot_app0.bin", "firmware/cam_mic_vest8.bin"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));
