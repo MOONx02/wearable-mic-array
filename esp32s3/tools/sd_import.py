@@ -189,24 +189,42 @@ def level_matched(clean: np.ndarray, ref: np.ndarray, speech: np.ndarray) -> tup
     return clean * scale, ref * scale
 
 
-def transcribe(clean: np.ndarray, model_name: str) -> list[tuple[float, float, str]]:
-    from faster_whisper import WhisperModel
+def speech_device() -> tuple[str, str]:
+    """Where Whisper runs: an NVIDIA GPU in float16 when there is one, else the CPU in int8."""
     try:
-        model = WhisperModel(model_name, device="cpu", compute_type="int8", local_files_only=True)
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda", "float16"
     except Exception:  # noqa: BLE001
-        print(f"  speech model {model_name} isn't on this computer yet: downloading it once…")
-        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        pass
+    return "cpu", "int8"
+
+
+def transcribe(clean: np.ndarray, model_name: str, words: bool = False, progress: bool = False) -> list[tuple]:
+    """(start, end, text) per line, or (start, end, text, [(start, end, word), ...]) with words=True."""
+    from faster_whisper import WhisperModel
+    device, compute = speech_device()
+    try:
+        model = WhisperModel(model_name, device=device, compute_type=compute, local_files_only=True)
+    except Exception:  # noqa: BLE001
+        print(f"  speech model {model_name} isn't on this computer yet: downloading it once…", flush=True)
+        model = WhisperModel(model_name, device=device, compute_type=compute)
     a = clean.astype(np.float32) / 32768.0
     peak = float(np.max(np.abs(a))) if len(a) else 0.0
     if peak < 1e-5:
         return []
     a *= 0.5 / peak
-    segs, _ = model.transcribe(a, language="en", beam_size=5, vad_filter=True, condition_on_previous_text=False)
-    out = []
+    segs, _ = model.transcribe(a, language="en", beam_size=5, vad_filter=True, condition_on_previous_text=False,
+                               word_timestamps=words)
+    out, shown, dur = [], -1, max(len(a) / FS, 1e-6)
     for s in segs:
+        if progress and int(s.end / dur * 20) != shown:
+            shown = int(s.end / dur * 20)
+            print(f"  transcribing with {model_name} on the {device.upper()}: {min(100, shown * 5)}%", flush=True)
         text = s.text.strip()
         if s.no_speech_prob < 0.6 and s.avg_logprob > -1.0 and text and text.lower() not in cap.HALLUCINATIONS:
-            out.append((s.start, s.end, text))
+            out.append((s.start, s.end, text, [(w.start, w.end, w.word.strip()) for w in s.words or []])
+                       if words else (s.start, s.end, text))
     return out
 
 
