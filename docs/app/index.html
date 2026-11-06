@@ -75,16 +75,19 @@
   <button id="centre" title="Quick: clap straight in front of the camera, then press this">Set centre</button>
   <button id="edge" title="Quick: clap at the right edge of the picture, then press this">Right edge</button>
   <label>Trigger <input id="thr" type="range" min="4" max="30" step="1"> <span id="thrv"></span></label>
-  <button id="rec" class="rec" title="Record to the board's microSD card">● Rec SD</button>
+  <label title="The model that re-reads each sentence for better captions; bigger ones need a stronger computer">Speech <select id="stt"><option value="auto">Auto</option></select></label>
+  <button id="rec" class="rec" title="Record to the board's microSD card: the mics, plus video while the camera is on">● Rec SD</button>
   <a class="btn" href="update.html" title="Flash new firmware onto the board over USB">Update firmware</a>
 </div>
 <div id="calbar">
   <b>Calibrate</b>
+  <button id="calguide" class="on" title="Step by step: shows where to put the phone and captures each spot by itself">Guide</button>
+  <button id="calskip" title="Skip this spot (e.g. no room to step back)">Skip</button>
   <label>Spot <select id="caltarget"></select></label>
   <label>Phone is <select id="caldist"><option value="0.5">0.5 m</option><option value="1">1 m</option>
     <option value="1.5">1.5 m</option><option value="2">2 m</option><option value="3">3 m</option>
     <option value="4">4 m</option></select> away</label>
-  <button id="calgrab" class="on" title="Takes the last 3 s of the phone's chirps">Capture</button>
+  <button id="calgrab" class="on" title="Capture now: takes the last 3 s of the phone's chirps (the guide does this by itself)">Capture</button>
   <button id="calundo">Undo</button>
   <button id="calclear">Clear all</button>
   <button id="calfine" title="Also correct what's left near each captured spot">Fine-tune</button>
@@ -97,7 +100,7 @@
   <canvas id="cv"></canvas>
   <div id="connect">
     <h1>Mic array 360</h1>
-    <p>Plug the ESP32-S3 (cam_mic_vest6 firmware) into this device's USB-C port, then tap Connect and pick the board.</p>
+    <p>Plug the ESP32-S3 (cam_mic_vest8 firmware; cam_mic_vest6 also works) into this device's USB-C port, then tap Connect and pick the board.</p>
     <button id="go" class="big on">Connect USB</button>
     <button id="demo">Demo (no board)</button>
     <a class="btn" href="update.html">Update the board's firmware</a>

@@ -7,6 +7,15 @@
 const FS = 16000, CH = 8, C = 343, SEG = 1024, NFFT = 2048, INTERP = 8;
 const BAND = [300, 6000], HOLD_S = 2.5, HISTORY_S = 10, BEHIND_DEG = 135, FB_SURE = 0.25;
 const DEAD_PTP = 8, STUCK_FRACTION = 0.5, CAPTION_HOLD_S = 9;
+// front/back with a body between the chest and back plates (Model.plateScore), as in mic_camera_view360.py:
+// plates more than PLATE_GAP m apart; the longest way round a body (samples); the band that bends round to the
+// far plate and the band the body shadows (Hz); the far-plate drop that counts as a full vote (dB); how far
+// the score raises the front or back half of the azimuth curve
+const PLATE_GAP = 0.08, PLATE_MAX_LAG = 24, PLATE_TIME_BAND = [300, 3000], PLATE_LEVEL_BAND = [1000, 4000];
+const PLATE_SHADOW_DB = 6, PLATE_TILT = 0.6;
+// a clap's direction: its first 12 ms (before echoes), then nothing new until it's 6 dB louder again or,
+// 0.4 s on, has stopped fading
+const ONSET_GATE_S = 0.012, RETRIGGER_DB = 6, STEADY_S = 0.4;
 // 150 Hz Butterworth high-pass (b0, b1, b2, a1, a2) for the levels and the trigger
 const HP = (() => {
   const w = (2 * Math.PI * 150) / FS, cw = Math.cos(w), al = Math.sin(w) / Math.SQRT2, a0 = 1 + al;
@@ -25,20 +34,28 @@ const FRONT = { 0: ["front outer L", 68.6, 22], 1: ["front outer R", -68.6, 22],
 // cam_mic_vest6: the chest plate's row of four with a pair 60 mm above the inner two
 const VEST6 = { 0: ["inner R", -22.9, 0, 0], 1: ["inner L", 22.9, 0, 0], 2: ["outer R", -68.6, 0, 0],
                 3: ["outer L", 68.6, 0, 0], 4: ["top R", -22.9, 0, 60], 5: ["top L", 22.9, 0, 60] };
+// cam_mic_vest8: the chest plate plus the back plate's pair, level with the row, chest to back as worn
+const BACK_DEPTH_MM = 150;
+const VEST8 = { ...VEST6, 6: ["back R", -68.6, -BACK_DEPTH_MM, 0], 7: ["back L", 68.6, -BACK_DEPTH_MM, 0] };
 const PRESETS = {
+  vest8: { name: "8 mics: vest chest 6 + back pair", geom: VEST8 },
   vest6: { name: "6 mics: vest chest, 4 in a row + 2 above", geom: VEST6 },
   rear5: { name: "5 mics: 4 front + rear centre", geom: { ...FRONT, 4: ["rear centre", 0, -22] } },
   six: { name: "6 mics: 4 front + 2 back", geom: { ...FRONT, 5: ["back R", -68.6, -22], 7: ["back L", 68.6, -22] } },
   front4: { name: "4 front mics (no front/back)", geom: { ...FRONT } },
 };
 
-const S = Object.assign({ layout: "vest6", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
+const S = Object.assign({ layout: "vest8", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
                           mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow",
                           roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true, camOff: false },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
 if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
-if (!PRESETS[S.layout]) S.layout = "vest6";
+if (!PRESETS[S.layout]) S.layout = "vest8";
+if (!S.vest8) {  // once: tablets that saved the six-mic vest move to the eight-mic one
+  if (S.layout === "vest6") S.layout = "vest8";
+  S.vest8 = true;
+}
 const save = () => localStorage.setItem("mic360", JSON.stringify(S));
 const wrap = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -199,9 +216,32 @@ class Model {
     let st = this.steer.get(key);
     if (st) return st;
     const pos = chans.map((c) => [this.geom[c][1] / 1000, this.geom[c][2] / 1000, (this.geom[c][3] || 0) / 1000]);
-    const ptp = (i) => Math.max(...pos.map((p) => p[i])) - Math.min(...pos.map((p) => p[i]));
-    const ptpx = ptp(0), ptpy = ptp(1), ptpz = ptp(2);
-    const m = (Math.ceil((Math.hypot(ptpx, ptpy, ptpz) / C) * FS) + 2) * INTERP;
+    const ptp = (i, ps = pos) => ps.length < 2 ? 0 : Math.max(...ps.map((p) => p[i])) - Math.min(...ps.map((p) => p[i]));
+    const ptpy = ptp(1);
+    // chest and back plates with a body between: sound bends round it, so pairs across the body don't have
+    // the straight-line delays. They only vote on front/back (plateScore); the angle comes from pairs on one plate.
+    let plates = null, spread = Math.hypot(ptp(0), ptpy, ptp(2));
+    const ptpz = ptp(2);
+    if (ptpy > PLATE_GAP) {
+      const ys = pos.map((p) => p[1]), mid = (Math.max(...ys) + Math.min(...ys)) / 2;
+      const front = [], back = [];
+      pos.forEach((p, i) => (p[1] > mid ? front : back).push(i));
+      const reach = (ix) => { const ps = ix.map((i) => pos[i]); return Math.hypot(ptp(0, ps), ptp(1, ps), ptp(2, ps)); };
+      spread = Math.max(reach(front), reach(back));
+      const band = (b) => { const r = [Math.max(lo, b[0]), Math.min(top, b[1])]; return r[1] - r[0] < 500 ? [lo, top] : r; };
+      const tb = band(PLATE_TIME_BAND), lb = band(PLATE_LEVEL_BAND);
+      const tk0 = Math.ceil((tb[0] * NFFT) / FS), tnb = Math.floor((tb[1] * NFFT) / FS) - tk0 + 1, TL = 2 * PLATE_MAX_LAG + 1;
+      const tcos = new Float32Array(TL * tnb), tsin = new Float32Array(TL * tnb);
+      for (let l = 0; l < TL; l++) {
+        for (let b = 0; b < tnb; b++) {
+          const ph = (2 * Math.PI * (tk0 + b) * (l - PLATE_MAX_LAG)) / NFFT;
+          tcos[l * tnb + b] = Math.cos(ph);
+          tsin[l * tnb + b] = Math.sin(ph);
+        }
+      }
+      plates = { front, back, tk0, tnb, tcos, tsin, lk0: Math.ceil((lb[0] * NFFT) / FS), lk1: Math.floor((lb[1] * NFFT) / FS) };
+    }
+    const m = (Math.ceil((spread / C) * FS) + 2) * INTERP;
     // directions: 360 azimuths × the elevations (just 0° for a flat array), index k * nel + e
     const els = ptpz > 0.01 ? ELEV : [0], nel = els.length, G = 360 * nel;
     const t = pos.map(([x, y, z]) => {
@@ -218,12 +258,18 @@ class Model {
     const pairs = [];
     for (let i = 0; i < chans.length; i++) {
       for (let j = i + 1; j < chans.length; j++) {
+        const onFront = plates ? plates.front.includes(i) : true;
+        if (plates && onFront !== plates.front.includes(j)) continue;
         const idx = new Int32Array(G);
         for (let g = 0; g < G; g++) {
           idx[g] = Math.min(2 * m, Math.max(0, Math.round((t[j][g] - t[i][g]) * FS * INTERP) + m));
         }
-        pairs.push([i, j, idx]);
+        pairs.push([i, j, idx, onFront]);
       }
+    }
+    if (plates) {
+      plates.nFront = pairs.filter((p) => p[3]).length;
+      plates.nBack = pairs.length - plates.nFront;
     }
     // GCC-PHAT is only needed at the lags the array can produce, so evaluate those directly instead of
     // an 8x zero-padded inverse FFT per pair.
@@ -237,14 +283,14 @@ class Model {
         sinT[l * nb + b] = Math.sin(ph);
       }
     }
-    st = { pairs, m, L, k0, nb, cosT, sinT, hasBack: ptpy > 0.01, els, nel };
+    st = { pairs, m, L, k0, nb, cosT, sinT, hasBack: ptpy > 0.01, els, nel, plates };
     this.steer.set(key, st);
     return st;
   }
 
   // samples [start, start + n) of channel c on the stream clock (must still be in the 2 s buffer)
-  at(c, start, n, out) {
-    const buf = this.x[c];
+  at(c, start, n, out, src = this.x) {
+    const buf = src[c];
     let r = (((this.wp - (this.total - start)) % this.N) + this.N) % this.N;
     for (let i = 0; i < n; i++) {
       out[i] = buf[r];
@@ -253,20 +299,29 @@ class Model {
     return out;
   }
 
-  // over the latest SEG samples, or the SEG from stream sample `start`
-  srp(srcs, st, start = null) {
-    const re = [], im = [];
+  // over the latest SEG samples, or the SEG from stream sample `start`; len < SEG keeps only its first len
+  // samples, with tapered ends
+  srp(srcs, st, start = null, len = SEG) {
+    const re = [], im = [], edge = Math.min(16, len >> 2);
     for (const s of srcs) {
       const r = new Float64Array(NFFT), i = new Float64Array(NFFT);
       const seg = start === null ? this.tail(s, SEG, this.seg) : this.at(s, start, SEG, this.seg);
-      for (let n = 0; n < SEG; n++) r[n] = seg[n];
+      for (let n = 0; n < len; n++) {
+        const k = Math.min(n, len - 1 - n);
+        r[n] = len < SEG && k < edge ? seg[n] * (0.5 - 0.5 * Math.cos((Math.PI * (k + 0.5)) / edge)) : seg[n];
+      }
       fft(r, i);
       re.push(r);
       im.push(i);
     }
     const grid = new Float64Array(360 * st.nel), cc = new Float64Array(st.L);
     const gr = new Float64Array(st.nb), gi = new Float64Array(st.nb);
-    for (const [i, j, idx] of st.pairs) {
+    // with two plates, the angle comes from the plate facing the sound: the far one hears it only after it
+    // bends round the body, which pulls its delays toward the side
+    const P = st.plates, score = P ? this.plateScore(re, im, P) : 0;
+    const [wFront, wBack] = plateWeights(P, score);
+    for (const [i, j, idx, onFront] of st.pairs) {
+      const w = onFront ? wFront : wBack;
       for (let b = 0; b < st.nb; b++) {
         const k = st.k0 + b;
         const ar = re[j][k], ai = im[j][k], br = re[i][k], bi = -im[i][k];
@@ -280,9 +335,52 @@ class Model {
         for (let b = 0; b < st.nb; b++) s += gr[b] * st.cosT[o + b] - gi[b] * st.sinT[o + b];
         cc[l] = s;
       }
-      for (let g = 0; g < grid.length; g++) grid[g] += cc[idx[g]];
+      for (let g = 0; g < grid.length; g++) grid[g] += w * cc[idx[g]];
     }
-    return toAzimuth(grid, st);
+    const curve = toAzimuth(grid, st);
+    if (P) tilt(curve, score);
+    return curve;
+  }
+
+  // Front (+1) to back (-1) from the chest and back plates: which plate hears the sound first (GCC-PHAT over
+  // the delays sound bending round a body can have) and which is louder in the band the body shadows.
+  plateScore(re, im, P) {
+    if (!P.front.length || !P.back.length) return 0;
+    const LW = PLATE_MAX_LAG, cc = new Float64Array(2 * LW + 1);
+    const gr = new Float64Array(P.tnb), gi = new Float64Array(P.tnb);
+    for (const i of P.front) {
+      for (const j of P.back) {
+        for (let b = 0; b < P.tnb; b++) {
+          const k = P.tk0 + b, ar = re[j][k], ai = im[j][k], br = re[i][k], bi = -im[i][k];
+          const xr = ar * br - ai * bi, xi = ar * bi + ai * br, mag = Math.hypot(xr, xi) + 1e-12;
+          gr[b] = xr / mag;
+          gi[b] = xi / mag;
+        }
+        for (let l = 0; l < cc.length; l++) {
+          const o = l * P.tnb;
+          let s = 0;
+          for (let b = 0; b < P.tnb; b++) s += gr[b] * P.tcos[o + b] - gi[b] * P.tsin[o + b];
+          cc[l] += s;
+        }
+      }
+    }
+    let later = 0, earlier = 0;  // the back plate later = in front
+    for (let l = 1; l <= LW; l++) {
+      later = Math.max(later, cc[LW + l]);
+      earlier = Math.max(earlier, cc[LW - l]);
+    }
+    const timing = (later - earlier) / (later + earlier + 1e-9);
+    const level = (ix) => {
+      let sum = 0;
+      for (const c of ix) {
+        let p = 0;
+        for (let k = P.lk0; k <= P.lk1; k++) p += re[c][k] ** 2 + im[c][k] ** 2;
+        sum += 10 * Math.log10(p + 1e-12);
+      }
+      return sum / ix.length;
+    };
+    const shadow = level(P.back) - level(P.front);
+    return 0.5 * timing + 0.5 * Math.tanh(-shadow / PLATE_SHADOW_DB);
   }
 
   // voice: someone is talking (voice focus says so), so search only the voice band, where the talker
@@ -293,15 +391,69 @@ class Model {
     const srcs = act.map((a) => a[1]);
     let strength = -Infinity;
     for (const s of srcs) strength = Math.max(strength, this.level[s] - this.floor[s]);
-    if (strength < thr) return;
-    if (this.last && this.now - this.last.t < 0.08) return;
+    if (strength < thr) { this.ev = null; return; }
     // where missing packets were joined up, every mic jumps at the same instant: not a sound
     if (this.gapAt !== undefined && this.total - this.gapAt < SEG + 800) return;
+    if (!voice) return this.transient(act, srcs, strength);
+    if (this.last && this.now - this.last.t < 0.08) return;
     const st = this.steering(act.map((a) => a[0]), voice ? 3400 : BAND[1]);
     // while someone talks, show the whole phrase's direction (as the subtitles do), not one 64 ms snapshot
     const phrase = voice ? speechCurve() : null;
     const curve = phrase && phrase.n >= 5 ? phrase.sum : this.srp(srcs, st);
     this.add({ t: this.now, ...pick(curve, st), strength, curve, n: act.length, voice });
+  }
+
+  // A clap or snap: its direction comes from its first ONSET_GATE_S. After that the room's echoes arrive
+  // from every side, so while it only dies away no new direction is taken. It counts again when it gets
+  // louder (a new sound on top) or stops fading (a steady sound, where the latest SEG is fine).
+  transient(act, srcs, strength) {
+    let ev = this.ev;
+    if (ev && strength > ev.low + RETRIGGER_DB && this.now - ev.t > 0.1) ev = null;
+    if (ev) {
+      ev.low = Math.min(ev.low, strength);
+      if (this.now - ev.ref[0] >= 0.2) {  // an echo tail keeps falling; even a big hall's loses 3 dB in 0.2 s
+        ev.holding = strength > ev.ref[1] - 3;
+        ev.ref = [this.now, strength];
+      }
+      if (ev.at === null) {
+        const steady = this.now - ev.t > STEADY_S && ev.holding;
+        if (!steady || (this.last && this.now - this.last.t < 0.08)) return;
+        const st = this.steering(act.map((a) => a[0]));
+        const curve = this.srp(srcs, st);
+        this.add({ t: this.now, ...pick(curve, st), strength, curve, n: act.length, voice: false });
+        return;
+      }
+    } else {
+      ev = this.ev = { t: this.now, low: strength, ref: [this.now, strength], holding: false, at: this.onset(srcs) };
+    }
+    const pre = Math.round(0.002 * FS), gate = Math.round(ONSET_GATE_S * FS);
+    if (this.total < ev.at + gate) return;  // the rest of its first ms arrive with the next tick
+    const st = this.steering(act.map((a) => a[0]));
+    const curve = this.srp(srcs, st, ev.at - pre, pre + gate);
+    ev.at = null;
+    this.add({ t: this.now, ...pick(curve, st), strength, curve, n: act.length, voice: false });
+  }
+
+  // stream sample where the newest sound starts: the first in the level window (800 samples) where the
+  // mics' summed 1 ms energy climbs 35% of the way from where the window starts to its peak
+  onset(srcs) {
+    const n = 800, w = 16, p = new Float64Array(n), e = new Float64Array(n);
+    for (const s of srcs) {
+      const h = this.tail(s, n, this.blk, this.xh);
+      for (let i = 0; i < n; i++) p[i] += h[i] * h[i];
+    }
+    let acc = 0, peak = 0;
+    for (let i = 0; i < n; i++) {
+      acc += p[i] - (i >= w ? p[i - w] : 0);
+      e[i] = acc;
+      if (acc > peak) peak = acc;
+    }
+    let base = 0;
+    for (let i = w; i < w + 64; i++) base += e[i] / 64;
+    const cut = base + 0.35 * (peak - base);
+    let i = w;
+    while (i < n - 1 && e[i] < cut) i++;
+    return this.total - n + i - (w >> 1);
   }
 
   add(det) {
@@ -326,6 +478,25 @@ function toAzimuth(grid, st) {
     if (den < 0) curve.el += (0.5 * (a - c) / den) * (st.els[e + 1] - st.els[e]);
   }
   return curve;
+}
+
+// Per-pair weights [chest plate, back plate] for the SRP sum: the plate facing the sound (by the plate score)
+// sets the angle, each plate's pairs normalised so the chest's many pairs don't outvote the back's one.
+function plateWeights(P, score) {
+  if (!P) return [1, 1];
+  if (!P.nBack) return [1, 0];
+  if (!P.nFront) return [0, 1];
+  return [(1 + score) / 2 / P.nFront, (1 - score) / 2 / P.nBack];
+}
+
+// Raises the front or back half of a front/back-mirrored azimuth curve by the plate score, so the peak and
+// pick's front/back margin follow it; at the sides it barely matters, so it fades. In place (keeps curve.el).
+function tilt(curve, score) {
+  const sorted = Array.from(curve).sort((a, b) => a - b), med = (sorted[179] + sorted[180]) / 2;
+  for (let k = 0; k < 360; k++) {
+    const above = curve[k] - med;
+    if (above > 0) curve[k] += above * PLATE_TILT * score * Math.cos(((k - 180) * Math.PI) / 180);
+  }
 }
 
 // Peak of an SRP curve: angle, spread (sigma), elevation (null for a flat array) and how sure front vs
@@ -521,18 +692,35 @@ class Beacon {
       for (let n = 0; n < U; n++) ui[n] = -ui[n];
       ups.push([ur, ui]);
     }
-    const grid = new Float64Array(360 * st.nel), cc = new Float64Array(st.L);
-    for (const [a, b, idx] of st.pairs) {
+    const xcorr = (a, b, lag) => {  // b against a, b later by lag (upsampled samples)
       const [ar, ai] = ups[a], [br, bi] = ups[b];
-      for (let l = 0; l < st.L; l++) {
-        const lag = l - st.m;
-        let s = 0;
-        for (let q = Math.max(0, -lag); q < Math.min(U, U - lag); q++) s += br[q + lag] * ar[q] + bi[q + lag] * ai[q];
-        cc[l] = s;
+      let s = 0;
+      for (let q = Math.max(0, -lag); q < Math.min(U, U - lag); q++) s += br[q + lag] * ar[q] + bi[q + lag] * ai[q];
+      return s;
+    };
+    const P = st.plates;
+    let score = 0;
+    if (P && P.front.length && P.back.length) {  // which plate's pulse comes first, and which is stronger
+      let later = 0, earlier = 0;
+      for (let lag = INTERP; lag <= PLATE_MAX_LAG * INTERP; lag += INTERP) {
+        let sl = 0, se = 0;
+        for (const i of P.front) for (const j of P.back) { sl += xcorr(i, j, lag); se += xcorr(i, j, -lag); }
+        later = Math.max(later, sl);
+        earlier = Math.max(earlier, se);
       }
-      for (let g = 0; g < grid.length; g++) grid[g] += cc[idx[g]];
+      const energy = (ix) => ix.reduce((s, c) => s + 10 * Math.log10(ups[c][0].reduce((e, v, n) => e + v * v + ups[c][1][n] ** 2, 0) + 1e-30), 0) / ix.length;
+      score = 0.5 * ((later - earlier) / (later + earlier + 1e-30)) + 0.5 * Math.tanh(-(energy(P.back) - energy(P.front)) / PLATE_SHADOW_DB);
     }
-    return toAzimuth(grid, st);
+    const [wFront, wBack] = plateWeights(P, score);
+    const grid = new Float64Array(360 * st.nel), cc = new Float64Array(st.L);
+    for (const [a, b, idx, onFront] of st.pairs) {
+      for (let l = 0; l < st.L; l++) cc[l] = xcorr(a, b, l - st.m);
+      const w = onFront ? wFront : wBack;
+      for (let g = 0; g < grid.length; g++) grid[g] += w * cc[idx[g]];
+    }
+    const curve = toAzimuth(grid, st);
+    if (P) tilt(curve, score);
+    return curve;
   }
 
 }
@@ -828,10 +1016,13 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
       if (!(await this.reopen())) return;
     }
   }
-  async send(bytes) {
-    if (!this.port?.writable) return;
-    const w = this.port.writable.getWriter();
-    try { await w.write(bytes); } finally { w.releaseLock(); }
+  send(bytes) {  // one write at a time: a second getWriter() while one is locked throws, and that byte is lost
+    this.sending = (this.sending || Promise.resolve()).then(async () => {
+      if (!this.port?.writable) return;
+      const w = this.port.writable.getWriter();
+      try { await w.write(bytes); } finally { w.releaseLock(); }
+    }).catch(() => {});
+    return this.sending;
   }
   async close() {
     this.closed = true;
@@ -840,7 +1031,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v19";
+const APP_VERSION = "v23";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -1026,7 +1217,7 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
                 finds.push({ sig: spatial(e.sig(), e.ang(t), false, e.level(t), "peak"), pos: 0 });
                 nextAt[e.id] = n + (e.gaps ? e.gaps[k % e.gaps.length] : e.period) * FS;
               }
-            } else if (cal.on && n >= (nextAt.calib ?? 0)) {  // the phone on the calibration spot
+            } else if (cal.on && model.now >= cal.since && n >= (nextAt.calib ?? 0)) {  // the phone on the calibration spot
               const [a, e] = demoPhoneDir();
               finds.push({ sig: spatial(codeChirp("calib"), a, false, 900 / S.calDist, "peak", e), pos: 0 });
               nextAt.calib = n + CODES.calib.period * FS;
@@ -1073,12 +1264,8 @@ const DEMO_FIND = {
 // The demo's made-up camera (aimed a little right and up, rolled, below the mics), which calibration should
 // find, and the phone on the spot calibration asks for.
 const DEMO_CAM = { offset: -6, tilt: 12, roll: 3, hfov: 68, kel: 1, camX: 0, camZ: -40 };
-function demoSpot() {
-  const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), aspect = cal.pic ? cal.pic.h / cal.pic.w : 0.75;
-  return [fx, fy, (fx - 0.5) * 2, (0.5 - fy) * 2 * aspect];
-}
 function demoPhoneDir() {
-  const [, , X, Y] = demoSpot();
+  const [, , X, Y] = calSpot();
   return camUnproj(X, Y, S.calDist, DEMO_CAM);
 }
 
@@ -1101,8 +1288,8 @@ function demoPicture(g, t) {
   g.fillStyle = "#e6edf3";
   g.font = "14px sans-serif";
   g.fillText(`demo camera  ${t.toFixed(1)} s`, 10, 20);
-  if (cal.on) {
-    const [fx, fy] = demoSpot(), px = fx * 320, py = fy * 240, s = Math.max(0.5, 1.6 / S.calDist);
+  if (cal.on && model.now >= cal.since) {  // not while it's being moved to the next spot
+    const [fx, fy] = calSpot(), px = fx * 320, py = fy * 240, s = Math.max(0.5, 1.6 / S.calDist);
     g.fillStyle = "#0b0f14";
     g.strokeStyle = "#e6edf3";
     g.lineWidth = 1.5;
@@ -1332,7 +1519,22 @@ const CAL_PRIOR = { offset: [0, 90], tilt: [0, 90], roll: [0, 4], hfov: [60, 40]
 const CAL_STEP = { offset: 0.05, tilt: 0.05, roll: 0.05, hfov: 0.05, kel: 0.001, camX: 0.5, camZ: 0.5 };
 const CAL_SIGMA = 0.02;  // a capture's usual scatter, in half picture widths (about 1°)
 const CAL_HITS_S = 3;
-const cal = { on: false, target: 0, custom: null, since: 0, pic: null, last: null };
+// The guide: spots to visit in order, [CAL_TARGETS index, metres]. The second distance is what pins down
+// where the camera sits on the array.
+const CAL_GUIDE = [[0, 1], [1, 1], [2, 1], [3, 1], [4, 1], [0, 2], [1, 2], [2, 2]];
+const CAL_MOVE_S = 2.5;   // after a capture, chirps are ignored this long while the phone is moved
+const CAL_AUTO_N = 6;     // chirps in a row (about 2.4 s) that must agree before the guide captures a spot
+const CAL_STEADY = 1.5;   // ... to within this many degrees (median distance from their median)
+const CAL_OFF = 0.3;      // once the fit has 3 points: how far (half picture widths, about 10°) the sound may land from the cross
+const CAL_FORCE_S = 6;    // steady but off the cross this long: captured anyway, since the fit may be what's off
+const cal = { on: false, target: 0, custom: null, since: 0, pic: null, last: null,
+              guide: true, step: 0, lastDir: null, offSince: null, status: "" };
+const calRecent = () => model.dets.filter((d) => d.kind === "calib" && d.t > cal.since && model.now - d.t < CAL_HITS_S);
+// the spot the phone should be on: picture fractions, and half picture widths from the centre (X right, Y up)
+function calSpot() {
+  const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), aspect = cal.pic ? cal.pic.h / cal.pic.w : 0.75;
+  return [fx, fy, (fx - 0.5) * 2, (0.5 - fy) * 2 * aspect];
+}
 
 const calAngle = (p, swap) => {
   const b = swap ? -p.ang : p.ang;
@@ -1443,11 +1645,29 @@ function calFit() {
 
 // ------------------------------------------------------------------ voice focus (StreamingFocus from mic_caption_view.py)
 
-// MVDR beam toward the talker + Wiener hiss filter on 8 ms frames. It learns the background from quiet
-// frames and the talker from speech frames as it goes, so it follows whoever is talking.
+// MVDR beam toward the talker + direction filter + Wiener hiss filter on 8 ms frames. It learns the
+// background from quiet frames and the talker from voiced speech frames as it goes, so it follows whoever
+// is talking. The same as tools/vest6_process.py (detect, DirectionFilter, Versions).
 const FN = 512, FH = 128, FB = FN / 2 + 1, FK0 = 10, FK1 = 108, FLO = 3;  // band 300–3400 Hz; bins under 70 Hz dropped
 const fft512 = makeFFT(FN);
 const FWIN = Float64Array.from({ length: FN }, (_, i) => Math.sqrt(0.5 - 0.5 * Math.cos((2 * Math.PI * i) / FN)));
+// What the beam learns from: no bangs or taps (a jump in every band within a frame, or one mic far louder
+// than the rest), only voiced speech (a pitch in the 300–2000 Hz harmonics, two frames running, plus 150 ms
+// for consonants), and, once the talker stands out from the background, only frames from their direction.
+const ONSET_DB = 12, SPREAD_DB = 12, HOLD = 15, HOLD_MAX = 40, VOICED = 0.6, HANG = 19, ON_TARGET = 0.3;
+const POST_FLOOR = 0.18, TOTAL_FLOOR = 0.1;  // direction filter down to -15 dB; with the noise filter, -20 dB
+const FW0 = 5, FHI = 64, FV0 = 10, FV1 = 64, LAG0 = 40, LAG1 = 200;  // 150 Hz, 2 kHz, 300–2000 Hz, 400–80 Hz pitch
+const FRW = (() => {  // the window's own correlation, divided out of the pitch correlation
+  const r = new Float64Array(LAG1);
+  let r0 = 0;
+  for (let i = 0; i < FN; i++) r0 += FWIN[i] * FWIN[i];
+  for (let l = LAG0; l < LAG1; l++) {
+    let s = 0;
+    for (let i = 0; i + l < FN; i++) s += FWIN[i] * FWIN[i + l];
+    r[l] = s / r0;
+  }
+  return r;
+})();
 
 function cSolve(Are, Aim, n, Bre, Bim, m) {  // complex A (n×n) X = B (n×m), row-major; Gaussian elimination
   const ar = Float64Array.from(Are), ai = Float64Array.from(Aim), br = Float64Array.from(Bre), bi = Float64Array.from(Bim);
@@ -1491,9 +1711,25 @@ function cSolve(Are, Aim, n, Bre, Bim, m) {  // complex A (n×n) X = B (n×m), r
 }
 
 class Focus {
-  constructor(srcs) {
+  constructor(srcs, pos) {  // pos: each mic's [x left, y front, z up] in m
     const n = (this.n = srcs.length), nn = n * n;
     this.srcs = srcs.slice();
+    this.pos = pos;
+    this.hist = [];
+    this.hold = this.held = this.ref = 0;
+    this.since = 99;
+    this.wasPitched = false;
+    this.pm = new Float64Array(n);
+    this.acRe = new Float64Array(FN);
+    this.acIm = new Float64Array(FN);
+    this.target = null;
+    this.tc = new Float64Array(FB * n);
+    this.ts = new Float64Array(FB * n);
+    this.sNow = new Float64Array(FB);
+    this.sSm = new Float64Array(FB);
+    this.sT = new Float64Array(FB).fill(1);  // how well speech lines up on the talker, per bin
+    this.sN = new Float64Array(FB).fill(1);  // how well the background does
+    this.gDir = new Float64Array(FB).fill(1);
     this.buf = srcs.map(() => new Float64Array(FN));
     this.pend = srcs.map(() => new Float64Array(FH));
     this.np = 0;
@@ -1523,27 +1759,126 @@ class Focus {
       if (++this.np === FH) { this.np = 0; this.frame(cb); }
     }
   }
+  // the talker's direction (azimuth + = left, elevation), from the caption tracker
+  setTarget(az, el) {
+    if (this.target && Math.abs(wrap(az - this.target[0])) < 2 && Math.abs(el - this.target[1]) < 2) return;
+    this.target = [az, el];
+    const th = (az * Math.PI) / 180, ph = (el * Math.PI) / 180, n = this.n;
+    for (let q = 0; q < n; q++) {
+      const [x, y, z] = this.pos[q], tau = -((x * Math.sin(th) + y * Math.cos(th)) * Math.cos(ph) + z * Math.sin(ph)) / C;
+      for (let k = 0; k < FB; k++) {
+        const a = (2 * Math.PI * k * FS * tau) / FN;
+        this.tc[k * n + q] = Math.cos(a);
+        this.ts[k * n + q] = Math.sin(a);
+      }
+    }
+  }
+  // Is anything a bang, tap or handling noise, and is there a voice? (loud: 8 dB over the floor)
+  detect(e, w, h, loud, quiet) {
+    const hist = this.hist;
+    let med = w, hmed = h, prev = w;
+    if (hist.length >= 12) {
+      const a = hist.slice(0, 10).map((v) => v[0]).sort((x, y) => x - y), b = hist.slice(0, 10).map((v) => v[1]).sort((x, y) => x - y);
+      med = (a[4] + a[5]) / 2;
+      hmed = (b[4] + b[5]) / 2;
+      prev = hist[11][0];
+    }
+    hist.push([w, h]);
+    if (hist.length > 12) hist.shift();
+    let hi = 0, n = this.n;
+    const pm = Array.from(this.pm).sort((x, y) => x - y);
+    for (let q = 0; q < n; q++) hi = Math.max(hi, this.pm[q]);
+    const mid = n % 2 ? pm[(n - 1) / 2] : (pm[n / 2 - 1] + pm[n / 2]) / 2;
+    // a knock arrives in one frame and in every band; a word builds up over several, mostly low
+    const onset = w - prev > 8 && w - med > ONSET_DB && h - hmed > ONSET_DB && e - this.floor > 12;
+    const handled = n > 2 && loud && 10 * Math.log10(hi / (mid + 1e-12)) > SPREAD_DB;
+    if (onset || handled) {
+      this.hold = HOLD;
+      this.held = 0;
+      this.ref = onset ? med : this.floor;
+    } else if (this.hold) {
+      this.held++;
+      this.hold--;
+      if (w > this.ref + 6 && this.held < HOLD_MAX) this.hold = Math.max(this.hold, 1);
+    }
+    // pitch: correlation of the summed mics' 300–2000 Hz harmonics at 80–400 Hz periods
+    const re = this.acRe, im = this.acIm;
+    re.fill(0);
+    im.fill(0);
+    for (let k = FV0; k <= FV1; k++) {
+      let sr = 0, si = 0;
+      for (let q = 0; q < n; q++) { sr += this.Xre[q][k]; si += this.Xim[q][k]; }
+      re[k] = re[FN - k] = sr * sr + si * si;
+    }
+    fft512(re, im);
+    let best = 0;
+    for (let l = LAG0; l < LAG1; l++) best = Math.max(best, re[l] / FRW[l]);
+    const pitched = re[0] > 0 && best > VOICED * re[0], voiced = pitched && this.wasPitched;
+    this.wasPitched = pitched;
+    this.since = voiced ? 0 : this.since + 1;
+    return { speech: loud && this.since <= HANG && !this.hold, quiet: quiet && !this.hold && !voiced };
+  }
+  // per bin, how well the mics line up on the talker; returns how much this frame comes from them
+  // (about 1 = all, 0 = no more than the background; null while they don't stand out from it)
+  direction(speech, quiet) {
+    const n = this.n, s = this.sNow, sT = this.sT, sN = this.sN, tc = this.tc, ts = this.ts;
+    let sw = 0, swt = 0, num = 0, den = 0;
+    for (let k = 0; k < FB; k++) {
+      let lr = 0, li = 0, P = 0;
+      for (let q = 0; q < n; q++) {
+        const xr = this.Xre[q][k], xi = this.Xim[q][k], c = tc[k * n + q], si = ts[k * n + q];
+        lr += xr * c - xi * si;
+        li += xr * si + xi * c;
+        P += xr * xr + xi * xi;
+      }
+      s[k] = (lr * lr + li * li) / (n * P + 1e-12);
+      if (k >= FK0 && k <= FK1) {
+        const span = sT[k] - sN[k], trust = Math.min(1, Math.max(0, (span - 0.1) / 0.2));
+        sw += P;
+        swt += P * trust;
+        num += P * trust * (s[k] - sN[k]);
+        den += P * trust * span;
+      }
+    }
+    for (let k = 0; k < FB; k++) {
+      const s3 = 0.5 * s[k] + 0.25 * (k > 0 ? s[k - 1] : 0) + 0.25 * (k < FB - 1 ? s[k + 1] : 0);
+      this.sSm[k] = 0.5 * this.sSm[k] + 0.5 * s3;
+      const span = sT[k] - sN[k], trust = Math.min(1, Math.max(0, (span - 0.1) / 0.2));
+      const g = Math.min(1, Math.max(POST_FLOOR, (this.sSm[k] - sN[k]) / Math.max(span, 0.05)));
+      this.gDir[k] = 1 - trust * (1 - g);
+      if (speech) sT[k] = 0.99 * sT[k] + 0.01 * s[k];
+      if (quiet) sN[k] = 0.99 * sN[k] + 0.01 * s[k];
+    }
+    return swt > 0.2 * sw ? num / den : null;
+  }
   frame(cb) {
     const n = this.n, nn = n * n;
     for (let q = 0; q < n; q++) { this.buf[q].copyWithin(0, FH); this.buf[q].set(this.pend[q], FN - FH); }
     this.fill = Math.min(FN, this.fill + FH);
     if (this.fill < FN) return;
-    let eb = 0, ew = 0;
+    let eb = 0, ew = 0, e150 = 0, ehi = 0;
     for (let q = 0; q < n; q++) {
       const re = this.Xre[q], im = this.Xim[q], b = this.buf[q];
       for (let i = 0; i < FN; i++) { re[i] = b[i] * FWIN[i]; im[i] = 0; }
       fft512(re, im);
+      let mb = 0;
       for (let k = FLO; k < FB; k++) {
         const p = re[k] * re[k] + im[k] * im[k];
         ew += p;
-        if (k >= FK0 && k <= FK1) eb += p;
+        if (k >= FW0) e150 += p;
+        if (k >= FHI) ehi += p;
+        if (k >= FK0 && k <= FK1) mb += p;
       }
+      eb += mb;
+      this.pm[q] = mb;
     }
     const e = 10 * Math.log10(eb / (n * (FK1 - FK0 + 1)) + 1e-12), w = 10 * Math.log10(ew / (n * (FB - FLO)) + 1e-12);
     if (this.floor === null) this.floor = e;
     else if (e < this.floor) this.floor = 0.9 * this.floor + 0.1 * e;
     else this.floor += 0.002;
-    const speech = e > this.floor + 8, quiet = e < this.floor + 3;
+    const loud = e > this.floor + 8;
+    const { speech, quiet } = this.detect(e, 10 * Math.log10(e150 / n + 1e-12), 10 * Math.log10(ehi / n + 1e-12),
+                                          loud, e < this.floor + 3);
     let bang = false;
     if (this.wide.length === 40) {
       const old = this.wide.slice(0, 37).sort((a, b) => a - b);
@@ -1554,7 +1889,10 @@ class Focus {
     this.frames++;
     const Yre = this.Yre, Yim = this.Yim;
     if (this.enabled) {
-      if (quiet || speech) {
+      const score = this.target ? this.direction(speech, quiet) : null;
+      if (!this.target) this.gDir.fill(1);
+      const learn = speech && (score === null || score > ON_TARGET);
+      if (quiet || learn) {
         const Rre = quiet ? this.RnRe : this.RsRe, Rim = quiet ? this.RnIm : this.RsIm, a1 = quiet ? 0.99 : 0.98, a2 = 1 - a1;
         for (let k = 0; k < FB; k++) {
           const o = k * nn;
@@ -1585,11 +1923,11 @@ class Focus {
         if (quiet) this.Pn[k] = 0.98 * this.Pn[k] + 0.02 * py;
         const post = py / (this.Pn[k] + 1e-12);
         const prio = 0.98 * this.gPrev[k] ** 2 * this.postPrev[k] + 0.02 * Math.max(post - 1, 0);
-        const g = Math.max(prio / (1 + prio), 0.12);
+        const g = Math.max(prio / (1 + prio), 0.12), gt = Math.max(g * this.gDir[k], TOTAL_FLOOR);
         this.gPrev[k] = g;
         this.postPrev[k] = post;
-        Yre[k] = yr * g;
-        Yim[k] = yi * g;
+        Yre[k] = yr * gt;
+        Yim[k] = yi * gt;
       }
     } else {
       for (let k = 0; k < FB; k++) {
@@ -1688,6 +2026,8 @@ let focus = null;
 // the recognizer runs behind. (Quiet speech under a fan never trips the clap-style detector, so this
 // can't come from model.last.)
 const utt = { log: [], tick: 0, skip: 0, lastEnd: 0 };
+// the voice focus's aim: the direction curves of the last second or so of speech, added up
+const aim = { acc: new Float64Array(360), el: 0, w: 0 };
 
 function trackSpeechDir(weight) {
   const act = model.active();
@@ -1697,6 +2037,16 @@ function trackSpeechDir(weight) {
   const med = (sorted[179] + sorted[180]) / 2, span = Math.max(sorted[359] - med, 1e-9);
   const curve = new Float32Array(360);
   for (let k = 0; k < 360; k++) curve[k] = (weight * (c[k] - med)) / span;
+  let kb = 0;
+  for (let k = 0; k < 360; k++) {
+    aim.acc[k] = 0.9 * aim.acc[k] + curve[k];
+    if (aim.acc[k] > aim.acc[kb]) kb = k;
+  }
+  if (c.el != null) {
+    aim.el = 0.9 * aim.el + weight * c.el;
+    aim.w = 0.9 * aim.w + weight;
+  }
+  focus?.setTarget(kb - 180, aim.w > 0 ? aim.el / aim.w : 0);
   const t = asr.fed / FS;
   utt.log.push({ t, curve, el: c.el ?? null, back: st.hasBack });
   while (utt.log.length && t - utt.log[0].t > 60) utt.log.shift();
@@ -1770,40 +2120,81 @@ function setPart(part, text) {
   part.line.text = part.line.parts.map((p) => p.text).join(" ");
 }
 
-// Better words: Vosk shows text instantly, then Moonshine base (about as accurate as Whisper base.en)
-// re-reads each finished sentence from the same focused audio and replaces it.
+// Better words: Vosk shows text instantly, then a bigger model re-reads each finished sentence from the
+// same focused audio and replaces it. Which one depends on what the device can run (S.stt, More menu).
 const HQ_URL = "asr_worker.js";
 const hq = { worker: null, ready: false, status: "", queue: [], busy: null, id: 0, ring: new Float32Array(FS * 40), last: "" };
+const STT = {
+  light: "Light: instant words only (old phones)",
+  standard: "Standard: Moonshine base (tablets)",
+  better: "Better: Whisper small, 400 MB (laptops)",
+  best: "Best: Whisper large-v3 turbo, 1.5 GB (strong graphics chip)",
+};
 
-function hqLoad() {
-  if (hq.worker || typeof Worker === "undefined") return;
+// Whisper only runs well on a graphics chip, and phones/tablets would rather keep their battery.
+// (Chrome reports at most 8 GB of memory, so cores and the GPU's maker are the better hints.)
+const sttAuto = (async () => {
+  const cores = navigator.hardwareConcurrency || 2, mem = navigator.deviceMemory || 4;
+  if (/Android|iPhone|iPad/.test(navigator.userAgent)) return ["standard", "a phone or tablet"];
+  if (cores <= 2 || mem < 2) return ["light", "a slow device"];
+  let gpu = null;
+  try { gpu = await navigator.gpu?.requestAdapter({ powerPreference: "high-performance" }); } catch (e) { /* no WebGPU */ }
+  if (!gpu || gpu.isFallbackAdapter || cores < 8) return ["standard", cores < 8 ? `${cores} cores` : "no usable graphics chip"];
+  const vendor = (gpu.info?.vendor || "").toLowerCase();
+  if (mem >= 8 && (/nvidia|amd|ati/.test(vendor) || cores >= 12)) return ["best", `${vendor || "a"} graphics chip, ${cores} cores`];
+  return ["better", `${vendor ? vendor + " " : ""}graphics chip, ${cores} cores`];
+})();
+
+async function hqLoad() {
+  if (hq.worker || hq.picking || typeof Worker === "undefined") return;
+  hq.picking = true;
+  const key = S.stt in STT ? S.stt : (await sttAuto)[0];
+  hq.picking = false;
+  if (key === "light" || hq.worker || !asr.rec) return;
   try {
     hq.worker = new Worker(HQ_URL, { type: "module" });
   } catch (e) {
     hq.status = "better words unavailable";
     return;
   }
+  const worker = hq.worker;
   hq.status = "loading better words…";
-  hq.worker.onmessage = ({ data: m }) => {
-    if (hq.failed) return;
+  worker.onmessage = ({ data: m }) => {
+    if (hq.failed || worker !== hq.worker) return;
     if (m.type === "progress") hq.status = `loading better words ${m.mb.toFixed(0)}/${m.total.toFixed(0)} MB (first time only)`;
     else if (m.type === "stage") hq.status = m.text;
-    else if (m.type === "ready") { hq.ready = true; hq.status = ""; hq.threads = m.threads; hqNext(); }
+    else if (m.type === "ready") {
+      Object.assign(hq, { ready: true, status: "", threads: m.threads, name: m.name + (m.device === "webgpu" ? " (GPU)" : "") });
+      hqNext();
+    }
     else if (m.type === "error") {
-      console.warn("moonshine:", m.message);
-      if (!hq.ready) { hq.failed = true; hq.status = "better words didn't load"; }
+      console.warn("better words:", m.message);
+      if (!hq.ready) {
+        hq.failed = true;
+        hq.status = /WebGPU/.test(m.message) ? m.message : "better words didn't load";
+        hint(`${STT[key].split(":")[0]} speech model didn't load (${m.message}); captions keep the instant words.`);
+      }
     }
     else if (m.type === "done") {
-      const job = hq.busy;
+      const job = hq.busy, text = unbracket(m.text);
       hq.busy = null;
-      if (job && job.id === m.id && plausible(m.text, m.sec)) setPart(job.part, m.text);
+      if (job && job.id === m.id && plausible(text, m.sec) && !(FILLER.test(text) && !FILLER.test(job.part.text))) setPart(job.part, text);
       hq.last = `${(m.ms / 1000).toFixed(1)} s for ${m.sec.toFixed(1)} s`;
       hqNext();
     }
   };
-  hq.worker.onerror = (e) => { hq.status = "better words didn't load"; console.warn("moonshine worker:", e.message); };
-  hq.worker.postMessage({ type: "load" });
+  worker.onerror = (e) => { hq.status = "better words didn't load"; console.warn("better words worker:", e.message); };
+  worker.postMessage({ type: "load", model: key });
 }
+
+function hqUnload() {
+  hq.worker?.terminate();
+  Object.assign(hq, { worker: null, ready: false, failed: false, status: "", queue: [], busy: null, last: "", name: "" });
+}
+
+// Whisper writes "[BLANK_AUDIO]", "(wind blowing)" or a lone "Thank you." for noise; keep Vosk's words then
+const unbracket = (t) => t.replace(/\[[^\]]*\]|\([^)]*\)|♪/g, " ").replace(/\s+/g, " ").trim();
+const FILLER = /^(thank you|thanks for watching|you|bye)[.!]?$/i;
 
 // Moonshine can loop on noise ("the the the …"); keep Vosk's words then
 function plausible(text, sec) {
@@ -1916,9 +2307,12 @@ function onFocusFrame(out, speech, bang, overFloor) {
 }
 
 function runFocus(s, frames) {
-  const srcs = model.active().map((a) => a[1]);
+  const act = model.active(), srcs = act.map((a) => a[1]);
   if (!srcs.length) return;
-  if (!focus || focus.srcs.join() !== srcs.join()) focus = new Focus(srcs);
+  if (!focus || focus.srcs.join() !== srcs.join() || focus.geom !== model.geom) {
+    focus = new Focus(srcs, act.map(([c]) => [model.geom[c][1] / 1000, model.geom[c][2] / 1000, (model.geom[c][3] || 0) / 1000]));
+    focus.geom = model.geom;
+  }
   focus.enabled = S.focus;
   focus.push(s, frames, onFocusFrame);
 }
@@ -2174,16 +2568,24 @@ function drawCalib(pic) {
       ctx.beginPath(); ctx.arc(dx, dy, 5, 0, 2 * Math.PI); ctx.fill();
     }
   }
-  const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), [x, y] = spot(fx, fy);
+  if (cal.guide && cal.step >= CAL_GUIDE.length) {
+    const errs = S.cal.map((p) => p.err ?? 0);
+    labelBox(pic.cx - 120, pic.y + 20, ["Calibration done", `${S.cal.length} spots · worst ${Math.max(0, ...errs).toFixed(1)}° off`], "#3fb950", pic);
+    return;
+  }
+  const [fx, fy] = calSpot(), [x, y] = spot(fx, fy);
   ctx.beginPath();
   ctx.arc(x, y, 22, 0, 2 * Math.PI);
   ctx.strokeStyle = "#56d4dd";
   ctx.lineWidth = 3;
   ctx.stroke();
   cross(x, y, 32, "#56d4dd", 3);
-  const hits = model.dets.filter((d) => d.kind === "calib" && d.t > cal.since && model.now - d.t < CAL_HITS_S).length;
+  const hits = calRecent().length;
   const name = cal.custom ? "Tapped spot" : CAL_TARGETS[cal.target][0];
-  labelBox(x + 30, y - 50, [`Phone's speaker here · ${name}`, `${S.calDist} m away · ${hits} chirp${hits === 1 ? "" : "s"} heard`], "#56d4dd", pic);
+  const lines = cal.guide
+    ? [`Step ${cal.step + 1} of ${CAL_GUIDE.length} · phone's speaker here`, `${name} · ${S.calDist} m away`, cal.status || "waiting for chirps"]
+    : [`Phone's speaker here · ${name}`, `${S.calDist} m away · ${hits} chirp${hits === 1 ? "" : "s"} heard`];
+  labelBox(x + 30, y - 50, lines, "#56d4dd", pic);
 }
 
 function where(angle) {
@@ -2405,7 +2807,7 @@ function drawTranscript(r) {
   const mics = focus ? `${focus.n} mic${focus.n === 1 ? "" : "s"}` : "waiting for mics";
   const state = !cap.on ? "captions off" : asr.status ? (failed ? "speech model failed" : "loading speech model…")
     : `offline · ${S.focus ? (focus && focus.wRe ? "voice focus" : "voice focus learning") : "plain mix"} · ${mics}`
-      + (hq.status ? ` · ${hq.status}` : hq.ready ? ` · Moonshine${hq.last ? ` ${hq.last}` : ""}` : "");
+      + (hq.status ? ` · ${hq.status}` : hq.ready ? ` · ${hq.name}${hq.last ? ` ${hq.last}` : ""}` : "");
   ctx.font = font(11);
   let st = state;
   while (st.length > 4 && ctx.measureText(st).width > r.w - 120) st = st.slice(0, -2);
@@ -2898,7 +3300,7 @@ setInterval(() => {
     if (pk === 0) s += " · no mic data yet";
   }
   if (boardFw) s += ` · ${boardFw.split(" · ")[0]}`;
-  if (wrongFirmware) s += " · board is sending 4 mics: update it to cam_mic_vest6 (More → Update firmware)";
+  if (wrongFirmware) s += " · board is sending 4 mics: flash it with cam_mic_vest8";
   if (boardMsg && !boardStats) s += ` · ${boardMsg}`;
   $("conn").textContent = s;
   $("conn").title = [boardFw, boardStats || boardMsg].filter(Boolean).join("\n");
@@ -2929,7 +3331,10 @@ setInterval(() => {
   const t0 = performance.now();
   model.tick(S.thr, t0 < cap.voiceUntil);
   if (S.find) findBuzz(S.findMode === "alarm" ? alarm.process() : beacon.process(FIND_MODES[S.findMode].codes));
-  else if (cal.on) beacon.process(["calib"]);
+  else if (cal.on) {
+    beacon.process(["calib"]);
+    calAuto();
+  }
   busy.ms += performance.now() - t0;
 }, 33);
 
@@ -3035,6 +3440,7 @@ const median = (v) => {
 function calShow(res = null) {
   $("calbar").classList.toggle("open", cal.on);
   $("calib").classList.toggle("on", cal.on);
+  $("calguide").classList.toggle("on", cal.guide);
   $("calfine").classList.toggle("on", S.calFine);
   $("caltarget").value = cal.custom ? "" : cal.target;
   $("caldist").value = String(S.calDist);
@@ -3075,16 +3481,89 @@ function setCal(on) {
     model.dets = [];
     model.last = null;
     cal.since = model.now;
-    hint(`On a phone open ${beaconUrl("calib")} and tap Start. Put its speaker on the cyan cross, wait for chirps, ` +
-         "then Capture. Phone not exactly on the cross? Tap where it is in the picture first.");
+    cal.lastDir = null;
+    if (cal.guide) guideGo(0, `On a phone open ${beaconUrl("calib")}, turn the volume up and tap Start.` +
+                              (S.cal.length ? " (Earlier points are kept; Clear all to start fresh.)" : ""));
+    else hint(`On a phone open ${beaconUrl("calib")} and tap Start. Put its speaker on the cyan cross, wait for chirps, ` +
+              "then Capture. Phone not exactly on the cross? Tap where it is in the picture first.");
   } else {
     model.dets = [];
     hint(S.cal.length ? "Calibration saved." : "Calibrate: put a phone playing the calibration chirp on spots in the picture");
   }
   calShow();
 }
+// The guide's next spot (or the end), told on screen and in the hint line.
+function guideGo(step, before = "") {
+  cal.step = step;
+  cal.custom = null;
+  cal.offSince = null;
+  cal.status = "";
+  const lead = before ? before + " " : "";
+  if (step >= CAL_GUIDE.length) {
+    const errs = S.cal.filter((p) => p.err !== undefined).map((p) => p.err);
+    const rms = Math.sqrt(errs.reduce((s, e) => s + e * e, 0) / Math.max(1, errs.length));
+    hint(`${lead}Calibration done: sound marks land within ${rms.toFixed(1)}° of the picture on average ` +
+         `(worst ${Math.max(0, ...errs).toFixed(1)}°). Tap Done, or Guide to go round again.`);
+    calShow();
+    return;
+  }
+  const [t, d] = CAL_GUIDE[step], back = step > 0 && d !== S.calDist;
+  cal.target = t;
+  S.calDist = d;
+  save();
+  hint(`${lead}Step ${step + 1} of ${CAL_GUIDE.length}: ${back ? `step back to ${d} m, then ` : ""}put the phone's ` +
+       `speaker on the cyan cross (${CAL_TARGETS[t][0].toLowerCase()}), ${d} m from the vest, facing it. ` +
+       "Hold it still; it captures by itself.");
+  calShow();
+}
+// Where the phone should go to bring its sound onto the cross: dx, dy = where the sound lands minus the cross.
+function moveWords(dx, dy) {
+  const w = [];
+  if (Math.abs(dx) > 0.1) w.push(dx > 0 ? "left" : "right");
+  if (Math.abs(dy) > 0.1) w.push(dy > 0 ? "down" : "up");
+  return w.join(" and ") || "a little";
+}
+// The guide, every tick: capture once the last few chirps agree, and say what's in the way until then.
+function calAuto() {
+  if (!cal.guide || cal.step >= CAL_GUIDE.length) return;
+  if (model.now < cal.since) { cal.status = "moving to this spot…"; return; }
+  const hits = calRecent().slice(-CAL_AUTO_N);
+  if (hits.length < CAL_AUTO_N) {
+    cal.status = hits.length ? `listening… ${hits.length} of ${CAL_AUTO_N} chirps` : "waiting for chirps: tap Start on the phone";
+    cal.offSince = null;
+    return;
+  }
+  const ref = hits[hits.length - 1].angle, rel = hits.map((d) => wrap(d.angle - ref)), mid = median(rel);
+  const els = hits.map((d) => d.elev).filter((v) => v !== null && v !== undefined), em = els.length ? median(els) : null;
+  const spread = median(rel.map((v) => Math.abs(v - mid))), espread = em === null ? 0 : median(els.map((v) => Math.abs(v - em)));
+  if (spread > CAL_STEADY || espread > CAL_STEADY) {
+    cal.status = "hold the phone still";
+    cal.offSince = null;
+    return;
+  }
+  const ang = wrap(ref + mid);
+  if (cal.lastDir && Math.hypot(wrap(ang - cal.lastDir[0]), em === null || cal.lastDir[1] === null ? 0 : em - cal.lastDir[1]) < 3) {
+    cal.status = "still at the last spot: move the phone onto the cross";
+    return;
+  }
+  if (S.cal.length >= 3) {  // the fit so far says where this sound lands: off the cross means the phone is
+    const oa = calAngle({ ang }, S.swap), q = camProj(oa, em, S.calDist), [, , X, Y] = calSpot();
+    if (q) {
+      const f = calFix(oa, em), dx = q[0] + f[0] - X, dy = q[1] + f[1] - Y;
+      if (Math.hypot(dx, dy) > CAL_OFF) {
+        cal.offSince ??= model.now;
+        if (model.now - cal.offSince < CAL_FORCE_S) {
+          cal.status = `sound is off the cross: move the phone ${moveWords(dx, dy)}`;
+          return;
+        }
+      }
+    }
+  }
+  cal.offSince = null;
+  calCapture();
+}
 function calCapture() {
-  const hits = model.dets.filter((d) => d.kind === "calib" && d.t > cal.since && model.now - d.t < CAL_HITS_S);
+  const hits = calRecent();
   if (hits.length < 4) {
     hint(`Only ${hits.length} chirp${hits.length === 1 ? "" : "s"} heard in the last ${CAL_HITS_S} s: is the phone on ` +
          "the Calibrate sound with the volume up? Closer, or lower the Trigger in More.");
@@ -3110,6 +3589,13 @@ function calCapture() {
   let msg = `Captured ${name} at ${S.calDist} m: ${hits.length} chirps, ±${spread.toFixed(1)}° scatter; now off by ${p.err.toFixed(1)}° there.`;
   if (spread > 4) msg += " That scatter is high: quieter room, phone louder or closer, then Undo and capture again.";
   if (res.flipped) msg += " Left and right were the wrong way round: Swap L/R turned on.";
+  if (cal.guide) {
+    cal.lastDir = [p.ang, p.e];
+    cal.since = model.now + CAL_MOVE_S;
+    guideGo(cal.step + 1, `✓ ${msg}`);
+    uiSync();
+    return;
+  }
   // walk the five main spots, then suggest another distance (that's what pins down where the camera sits)
   if (!cal.custom) {
     cal.target = (cal.target + 1) % 5;
@@ -3124,7 +3610,36 @@ $("calib").onclick = () => setCal(!cal.on);
 $("cam").onclick = () => setCam(!S.camOff);
 $("caldone").onclick = () => setCal(false);
 $("calgrab").onclick = calCapture;
-$("caltarget").onchange = (e) => { cal.target = +e.target.value; cal.custom = null; cal.since = model.now; };
+$("calguide").onclick = () => {
+  cal.guide = !cal.guide;
+  cal.since = model.now;
+  cal.lastDir = null;
+  if (cal.guide) guideGo(0, "Guide started from the first spot.");
+  else {
+    hint("Guide off: pick a Spot, put the phone there and tap Capture.");
+    calShow();
+  }
+};
+$("calskip").onclick = () => {
+  cal.since = model.now;
+  if (cal.guide) {
+    if (cal.step < CAL_GUIDE.length) guideGo(cal.step + 1, "Skipped.");
+    return;
+  }
+  cal.target = (cal.target + 1) % CAL_TARGETS.length;
+  cal.custom = null;
+  calShow();
+};
+$("caltarget").onchange = (e) => {
+  cal.target = +e.target.value;
+  cal.custom = null;
+  cal.since = model.now;
+  if (cal.guide) {
+    cal.guide = false;
+    hint(`Guide off: put the phone on ${CAL_TARGETS[cal.target][0].toLowerCase()} and tap Capture.`);
+  }
+  calShow();
+};
 $("caldist").onchange = (e) => { S.calDist = +e.target.value; cal.since = model.now; save(); };
 $("usualdist").onchange = (e) => { S.dist = Math.max(0.3, Math.min(10, +e.target.value || 1.5)); save(); calShow(); };
 $("calfine").onclick = () => { S.calFine = !S.calFine; save(); calShow(); };
@@ -3164,7 +3679,10 @@ $("res").onchange = (e) => conn?.send(new TextEncoder().encode(e.target.value));
 $("morebtn").onclick = () => { $("more").classList.toggle("open"); $("morebtn").classList.toggle("on"); setTimeout(resize, 0); };
 $("rec").onclick = () => {
   const on = !$("rec").classList.contains("on");
-  conn?.send(new TextEncoder().encode(on ? "a" : "s"));
+  // 'v' = mics + the camera's picture, 'a' = mics only (the camera is off, so there's no picture to keep)
+  conn?.send(new TextEncoder().encode(on ? (S.camOff ? "a" : "v") : "s"));
+  hint(on ? (S.camOff ? "Recording the mics to the SD card (camera off: no video)." : "Recording mics + video to the SD card.")
+          : "Stopped: the take is on the SD card.");
   $("rec").classList.toggle("on", on);
   $("rec").textContent = on ? "■ Stop SD" : "● Rec SD";
 };
@@ -3175,9 +3693,24 @@ function asrUnload() {
   asr.model = null;
   asr.rec = null;
   asr.n = 0;
-  hq.worker?.terminate();
-  Object.assign(hq, { worker: null, ready: false, failed: false, status: "", queue: [], busy: null, last: "" });
+  hqUnload();
 }
+
+$("stt").onchange = (e) => {
+  S.stt = e.target.value;
+  save();
+  hqUnload();
+  if (asr.rec) hqLoad();
+  const k = S.stt in STT ? S.stt : null;
+  hint(k ? `Speech: ${STT[k]}.` + (k === "better" || k === "best" ? " It downloads the first time, then stays on this device." : "")
+    : "Speech: Auto picks for this device.");
+};
+sttAuto.then(([k, why]) => {
+  const box = $("stt");
+  box.innerHTML = "";
+  for (const [v, label] of [["auto", `Auto: ${STT[k].split(":")[0]} (${why})`], ...Object.entries(STT)]) box.add(new Option(label, v));
+  box.value = S.stt in STT ? S.stt : "auto";
+});
 
 function setCC(on) {
   cap.on = on;
