@@ -10,9 +10,9 @@ const DEAD_PTP = 8, STUCK_FRACTION = 0.5, CAPTION_HOLD_S = 9;
 // front/back with a body between the chest and back plates (Model.plateScore), as in mic_camera_view360.py:
 // plates more than PLATE_GAP m apart; the longest way round a body (samples); the band that bends round to the
 // far plate and the band the body shadows (Hz); the far-plate drop that counts as a full vote (dB); how far
-// the score raises the front or back half of the azimuth curve
+// the score raises the front or back half of the azimuth curve; the most one plate's pairs get for a single tone
 const PLATE_GAP = 0.08, PLATE_MAX_LAG = 24, PLATE_TIME_BAND = [300, 3000], PLATE_LEVEL_BAND = [1000, 4000];
-const PLATE_SHADOW_DB = 6, PLATE_TILT = 0.6;
+const PLATE_SHADOW_DB = 6, PLATE_TILT = 0.6, PLATE_TONE_MAX = 0.6;
 // a clap's direction: its first 12 ms (before echoes), then nothing new until it's 6 dB louder again or,
 // 0.4 s on, has stopped fading
 const ONSET_GATE_S = 0.012, RETRIGGER_DB = 6, STEADY_S = 0.4;
@@ -239,7 +239,7 @@ class Model {
           tsin[l * tnb + b] = Math.sin(ph);
         }
       }
-      plates = { front, back, tk0, tnb, tcos, tsin, lk0: Math.ceil((lb[0] * NFFT) / FS), lk1: Math.floor((lb[1] * NFFT) / FS) };
+      plates = { front, back, tk0, tnb, tcos, tsin, lk0: Math.ceil((lb[0] * NFFT) / FS), lk1: Math.floor((lb[1] * NFFT) / FS), tonal: top - lo < 500 };
     }
     const m = (Math.ceil((spread / C) * FS) + 2) * INTERP;
     // directions: 360 azimuths × the elevations (just 0° for a flat array), index k * nel + e
@@ -346,6 +346,18 @@ class Model {
   // the delays sound bending round a body can have) and which is louder in the band the body shadows.
   plateScore(re, im, P) {
     if (!P.front.length || !P.back.length) return 0;
+    const level = (ix) => {
+      let sum = 0;
+      for (const c of ix) {
+        let p = 0;
+        for (let k = P.lk0; k <= P.lk1; k++) p += re[c][k] ** 2 + im[c][k] ** 2;
+        sum += 10 * Math.log10(p + 1e-12);
+      }
+      return sum / ix.length;
+    };
+    const shadow = level(P.back) - level(P.front);
+    // a single tone's cross-correlation repeats every period, so which plate leads is a guess: level only
+    if (P.tonal) return Math.tanh(-shadow / PLATE_SHADOW_DB);
     const LW = PLATE_MAX_LAG, cc = new Float64Array(2 * LW + 1);
     const gr = new Float64Array(P.tnb), gi = new Float64Array(P.tnb);
     for (const i of P.front) {
@@ -370,16 +382,6 @@ class Model {
       earlier = Math.max(earlier, cc[LW - l]);
     }
     const timing = (later - earlier) / (later + earlier + 1e-9);
-    const level = (ix) => {
-      let sum = 0;
-      for (const c of ix) {
-        let p = 0;
-        for (let k = P.lk0; k <= P.lk1; k++) p += re[c][k] ** 2 + im[c][k] ** 2;
-        sum += 10 * Math.log10(p + 1e-12);
-      }
-      return sum / ix.length;
-    };
-    const shadow = level(P.back) - level(P.front);
     return 0.5 * timing + 0.5 * Math.tanh(-shadow / PLATE_SHADOW_DB);
   }
 
@@ -486,6 +488,9 @@ function plateWeights(P, score) {
   if (!P) return [1, 1];
   if (!P.nBack) return [1, 0];
   if (!P.nFront) return [0, 1];
+  // a single tone above ~1.3 kHz has several equally good angles on the back pair (137 mm apart), so for
+  // tones the chest keeps a say from behind: bent round the body it's biased, but it picks the right one
+  if (P.tonal) score = Math.max(-PLATE_TONE_MAX, Math.min(PLATE_TONE_MAX, score));
   return [(1 + score) / 2 / P.nFront, (1 - score) / 2 / P.nBack];
 }
 
@@ -600,7 +605,13 @@ class Beacon {
     if (adv < 2048) return found;
     if (adv > BN - BLEN) adv = BN - BLEN;
     const W = adv + BLEN, start = model.total - W, srcs = act.map((a) => a[1]), n = srcs.length;
-    const energy = new Float64Array(adv), scores = codes.map(() => new Float64Array(adv)), den = new Float64Array(adv);
+    // with a body between the plates a chirp from behind barely reaches the chest, so each plate is scored
+    // on its own and the plate facing the beacon decides
+    const st = model.steering(act.map((a) => a[0]), CHIRP_HI, CHIRP_LO), P = st.plates;
+    const groups = P && P.front.length && P.back.length ? [P.front, P.back] : [srcs.map((_, i) => i)];
+    const plateOf = srcs.map((_, si) => groups.findIndex((g) => g.includes(si)));
+    const energy = groups.map(() => new Float64Array(adv)), den = new Float64Array(adv);
+    const scores = codes.map(() => groups.map(() => new Float64Array(adv)));
     const re = new Float64Array(BN), im = new Float64Array(BN), yr = new Float64Array(BN), yi = new Float64Array(BN);
     const cum = new Float64Array(W + 1);
     srcs.forEach((s, si) => {
@@ -618,11 +629,11 @@ class Beacon {
       for (let i = 0; i < W; i++) cum[i + 1] = cum[i] + (yr[i] * yr[i] + yi[i] * yi[i]) / (BN * BN);
       for (let p = 0; p < adv; p++) {
         const e = cum[p + BLEN] - cum[p];
-        energy[p] += e;
+        energy[plateOf[si]][p] += e;
         den[p] = Math.sqrt(e);
       }
       codes.forEach((code, ci) => {
-        const { tRe, tIm, norm } = this.tmpl[code], [cr, cim] = this.out(code, si), sc = scores[ci];
+        const { tRe, tIm, norm } = this.tmpl[code], [cr, cim] = this.out(code, si), sc = scores[ci][plateOf[si]];
         cr.fill(0);
         cim.fill(0);
         for (let k = this.k0, b = 0; k <= this.k1; k++, b++) {
@@ -636,9 +647,15 @@ class Beacon {
     });
     this.done = model.total;
     codes.forEach((code, ci) => {
-      const sc = scores[ci], peaks = [];
+      const sc = new Float64Array(adv), plate = new Uint8Array(adv), peaks = [];
       for (let p = 0; p < adv; p++) {
-        if (sc[p] / n >= BEACON_SCORE && !(p && sc[p] < sc[p - 1]) && !(p + 1 < adv && sc[p] < sc[p + 1])) peaks.push(p);
+        groups.forEach((g, gi) => {
+          const v = scores[ci][gi][p] / g.length;
+          if (v > sc[p]) { sc[p] = v; plate[p] = gi; }
+        });
+      }
+      for (let p = 0; p < adv; p++) {
+        if (sc[p] >= BEACON_SCORE && !(p && sc[p] < sc[p - 1]) && !(p + 1 < adv && sc[p] < sc[p + 1])) peaks.push(p);
       }
       peaks.sort((a, b) => sc[b] - sc[a]);
       const kept = [];
@@ -650,12 +667,13 @@ class Beacon {
         kept.push(p);
       }
       if (!kept.length) return;
-      const st = model.steering(act.map((a) => a[0]), CHIRP_HI, CHIRP_LO), outs = srcs.map((_, si) => this.out(code, si));
+      const outs = srcs.map((_, si) => this.out(code, si));
       for (const p of kept) {
-        const curve = this.pulseSRP(outs, p, st);
-        // the chirp's own energy (score² × window energy), so a sound overlapping it doesn't make it seem closer
-        const level = 10 * Math.log10(((sc[p] / n) ** 2 * energy[p]) / n / BLEN / (32768 * 32768) + 1e-12);
-        found.push({ t: model.now, at: (start + p) / FS, ...pick(curve, st), strength: 0, curve, n, kind: code, score: sc[p] / n, level });
+        const curve = this.pulseSRP(outs, p, st), g = plate[p];
+        // the chirp's own energy on the plate that heard it (score² × window energy), so a sound overlapping
+        // it doesn't make it seem closer
+        const level = 10 * Math.log10((sc[p] ** 2 * energy[g][p]) / groups[g].length / BLEN / (32768 * 32768) + 1e-12);
+        found.push({ t: model.now, at: (start + p) / FS, ...pick(curve, st), strength: 0, curve, n, kind: code, score: sc[p], level });
       }
     });
     found.sort((a, b) => a.at - b.at);
@@ -781,21 +799,37 @@ class Alarm {
     const srcs = act.map((a) => a[1]), nb = this.k1 - this.k0 + 1;
     if (model.total - this.done > FS) { this.done = model.total - FS; this.run = null; }
     const re = new Float64Array(NFFT), im = new Float64Array(NFFT), P = new Float64Array(nb);
+    // the level comes from the plate facing the alarm, so one behind doesn't seem farther than one ahead
+    const Pl = model.steering(act.map((a) => a[0])).plates;
+    const groups = Pl && Pl.front.length && Pl.back.length ? [Pl.front, Pl.back] : [srcs.map((_, i) => i)];
+    const plateOf = srcs.map((_, si) => groups.findIndex((g) => g.includes(si))), PG = groups.map(() => new Float64Array(nb));
     while (this.done + SEG <= model.total) {
       const start = this.done;
       this.done += ALARM.hop;
       P.fill(0);
-      for (const s of srcs) {
+      for (const g of PG) g.fill(0);
+      srcs.forEach((s, si) => {
         model.at(s, start, SEG, this.buf);
         re.fill(0);
         im.fill(0);
         for (let i = 0; i < SEG; i++) re[i] = this.buf[i] * this.win[i];
         fft(re, im);
-        for (let b = 0; b < nb; b++) P[b] += re[this.k0 + b] ** 2 + im[this.k0 + b] ** 2;
-      }
+        const pg = PG[plateOf[si]];
+        for (let b = 0; b < nb; b++) {
+          const v = re[this.k0 + b] ** 2 + im[this.k0 + b] ** 2;
+          P[b] += v;
+          pg[b] += v;
+        }
+      });
       let kp = 0, total = 0, tone = 0;
       for (let b = 0; b < nb; b++) { total += P[b]; if (P[b] > P[kp]) kp = b; }
       for (let b = Math.max(0, kp - 3); b <= Math.min(nb - 1, kp + 3); b++) tone += P[b];
+      let toneMic = 0;  // per mic, on the louder plate
+      PG.forEach((pg, gi) => {
+        let t = 0;
+        for (let b = Math.max(0, kp - 3); b <= Math.min(nb - 1, kp + 3); b++) t += pg[b];
+        toneMic = Math.max(toneMic, t / groups[gi].length);
+      });
       const med = Float64Array.from(P).sort()[nb >> 1];
       let dk = 0;  // the peak between bins: a parabola through the log powers
       if (kp > 0 && kp < nb - 1) {
@@ -804,7 +838,7 @@ class Alarm {
       }
       const f = ((this.k0 + kp + dk) * FS) / NFFT;
       // the tone's mean square per mic (Hann window, positive frequencies only), in dBFS
-      const level = 10 * Math.log10((2 * tone) / srcs.length / (NFFT * SEG * 0.375) / (32768 * 32768) + 1e-12);
+      const level = 10 * Math.log10((2 * toneMic) / (NFFT * SEG * 0.375) / (32768 * 32768) + 1e-12);
       const on = P[kp] >= med * 10 ** (ALARM.tonal / 10) && tone >= ALARM.share * total;
       const r = this.run;
       if (on && r && samePitch(f, r.f)) {
@@ -1031,7 +1065,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v24";
+const APP_VERSION = "v25";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
