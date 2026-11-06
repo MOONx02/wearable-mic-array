@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Process a 6-mic vest recording (cam_mic_vest6) on the laptop, and measure how well the noise is cancelled.
+"""Process a 6- or 8-mic vest recording (cam_mic_vest6, cam_mic_vest8) on the laptop, and measure how well
+the noise is cancelled.
 
-    python3 tools/vest6_process.py /Volumes/<card>             every 6-mic take on the card
+    python3 tools/vest6_process.py /Volumes/<card>             every vest take on the card
     python3 tools/vest6_process.py /Volumes/<card> --take 3    just T0003
     python3 tools/vest6_process.py path/to/T0003               a take folder copied off the card
-    python3 tools/vest6_process.py mic_takes/vest6_XXXX.wav    a recording from mic_camera_view360.py
+    python3 tools/vest6_process.py mic_takes/vest8_XXXX.wav    a recording from mic_camera_view360.py
     python3 tools/vest6_process.py mic_takes/vest6/T0003 --transcribe-only --model large-v3-turbo
                                                                only the transcript again, with a bigger model
     python3 tools/vest6_process.py path/to/T0003 --dereverb    also take the room's echo out (WPE) first
@@ -13,16 +14,22 @@
 biggest one this computer runs in reasonable time: large-v3 with an NVIDIA GPU, large-v3-turbo with 24 GB+
 and 10+ cores, medium.en with 16 GB+, small.en with 8 GB+, else base.en. A model downloads once on first use.
 
---dereverb runs WPE echo removal on the six mics before the beam (linear and multi-mic, so it goes first;
+With the 8-mic vest the back pair sits behind the body. Sound reaches the far plate only by bending round
+it, so mics on opposite plates never pair up for direction: they vote on front or back (which plate hears
+it first, and louder above 1 kHz), the angle comes from the plate facing the talker, and so do the
+delay-and-sum beam and the direction filter. The MVDR beam and echo removal learn from all the mics.
+
+--dereverb runs WPE echo removal on all the mics before the beam (linear and multi-mic, so it goes first;
 the noise filter stays last) and adds two versions: raw_mic_echo_removed.wav and
 voice_focus_echo_removed.wav; the transcript is then made from the latter. The other versions are unchanged,
 so voice focus with and without echo removal can be compared directly.
 
 For each take, writes to mic_takes/vest6/<take>/ (or --out):
-    raw_6mic.wav        all six mics, joined into one file (headers repaired if the power was pulled)
+    raw_6mic.wav        all the mics, joined into one file (headers repaired if the power was pulled);
+                        raw_8mic.wav for the 8-mic vest
     the same speech at the same loudness, so only the background differs between them:
       raw_mic.wav       one mic, as it was recorded (--ref, default the mic with the typical background)
-      mic_average.wav   all six mics averaged, not aimed anywhere
+      mic_average.wav   all the mics averaged, not aimed anywhere
       beam.wav          delay-and-sum beam aimed at the talker (the mic positions + the talker's direction)
       beam_mvdr.wav     MVDR beam: voice focus without its filter (cancels the background's direction)
       mic_filter.wav    one mic + the noise filter, no array: what a single-mic noise suppressor manages
@@ -86,7 +93,7 @@ OUT_ROOT = HERE.parent / "mic_takes" / "vest6"
 # (file, name in the report and the review app, what it is)
 VERSIONS = [
     ("raw_mic.wav", "Raw mic", "one mic, as recorded"),
-    ("mic_average.wav", "All mics averaged", "six mics added up, not aimed"),
+    ("mic_average.wav", "All mics averaged", "every mic added up, not aimed"),
     ("beam.wav", "Beam at talker", "delay-and-sum aimed at the talker"),
     ("beam_mvdr.wav", "MVDR beam", "voice focus without the filter"),
     ("mic_filter.wav", "Mic + filter", "one mic + the noise filter, no array"),
@@ -161,7 +168,7 @@ def auto_transcriber() -> tuple[str, str]:
 # ------------------------------------------------------------------ reading takes
 
 def read_take(path: Path) -> tuple[np.ndarray, dict, list, str]:
-    """-> (audio (n, 6) int16, info, camera frames, layout name)."""
+    """-> (audio (n, 6 or 8) int16, info, camera frames, layout name: vest6 or vest8)."""
     if path.suffix.lower() == ".wav":
         with wave.open(str(path), "rb") as w:
             if w.getframerate() != FS or w.getsampwidth() != 2:
@@ -169,13 +176,17 @@ def read_take(path: Path) -> tuple[np.ndarray, dict, list, str]:
             nch = w.getnchannels()
             x = np.frombuffer(w.readframes(w.getnframes()), "<i2").reshape(-1, nch)
         if nch < 6:
-            raise SystemExit(f"{path}: {nch} channels; a vest6 recording has 6")
-        return x[:, :6].copy(), {"mode": "voice", "mics": str(nch)}, [], "vest6"
+            raise SystemExit(f"{path}: {nch} channels; a vest recording has 6 or 8")
+        n = 8 if nch >= 8 else 6
+        return x[:, :n].copy(), {"mode": "voice", "mics": str(nch)}, [], "vest8" if n == 8 else "vest6"
     info = sd.read_info(path)
     nch = int(info.get("mics", 6))
-    layout = info.get("mic_layout", "vest6")
-    if nch != 6:
-        raise SystemExit(f"{path.name}: {nch} mics. This tool is for the 6-mic vest; 4-mic takes go through sd_import.py")
+    # "vest8: D1 ch0 inner R / ..." names the layout before the colon; the positions on the card aren't used
+    # (an early vest8 firmware wrote a placeholder back depth), the layout's own are
+    layout = info.get("mic_layout", "").split(":")[0].strip() or ("vest8" if nch == 8 else "vest6")
+    if nch not in (6, 8) or layout not in ("vest6", "vest8"):
+        raise SystemExit(f"{path.name}: {nch} mics ({layout}). This tool is for the 6- and 8-mic vests; "
+                         "4-mic takes go through sd_import.py")
     audio, repaired = sd.read_audio(path, nch)
     if repaired:
         info["repaired"] = str(repaired)
@@ -186,7 +197,7 @@ def find_takes(path: Path, number: int | None) -> list[Path]:
     if path.suffix.lower() == ".wav" or (path / "info.txt").exists():
         return [path]
     root = path / "takes" if (path / "takes").is_dir() else path
-    takes = sorted(p for p in root.glob("T[0-9]*") if p.is_dir() and sd.read_info(p).get("mics", "4") == "6")
+    takes = sorted(p for p in root.glob("T[0-9]*") if p.is_dir() and sd.read_info(p).get("mics", "4") in ("6", "8"))
     if number is not None:
         takes = [p for p in takes if p.name == f"T{number:04d}"]
     return takes
@@ -449,10 +460,22 @@ class Locator:
         return out
 
 
+def plates_of(pos: np.ndarray) -> tuple[list[int], list[int]] | None:
+    """(chest, back) mic indices when the mics sit on both sides of a body (the 8-mic vest), else None."""
+    if np.ptp(pos[:, 1]) <= v360.PLATE_GAP:
+        return None
+    mid = (pos[:, 1].max() + pos[:, 1].min()) / 2
+    front = [i for i in range(len(pos)) if pos[i, 1] > mid]
+    back = [i for i in range(len(pos)) if pos[i, 1] <= mid]
+    return (front, back) if front and back else None
+
+
 class TalkerLocator:
     """Where speech comes from, with the background taken out: the mics' cross-spectra averaged over the
     speech frames, minus their average over the quiet frames nearby (within 10 s), so a steady fan that's
-    louder than the voice doesn't win; then SRP-PHAT over azimuth x elevation in the voice band."""
+    louder than the voice doesn't win; then SRP-PHAT over azimuth x elevation in the voice band. With chest
+    and back plates, as in mic_camera_view360: pairs on one plate give the angle, the plates vote on front
+    or back (timing and the body's shadow), and the plate facing the talker counts most."""
 
     def __init__(self, x: np.ndarray, geom: dict, chans: list[int], speech: np.ndarray, quiet: np.ndarray):
         self.x = np.concatenate([x, np.zeros((NFFT, x.shape[1]))])
@@ -465,6 +488,16 @@ class TalkerLocator:
         u = v360.unit_vectors(np.arange(-180, 180)[:, None], self.els[None, :]).reshape(-1, 3)
         tau = -(u @ pos.T) / v360.C  # (directions, mics) arrival times
         self.pairs = [(i, j) for i in range(len(chans)) for j in range(i + 1, len(chans))]
+        self.plates = plates_of(pos)
+        if self.plates:
+            front = self.plates[0]
+            self.pairs = [(i, j) for i, j in self.pairs if (i in front) == (j in front)]
+            self.on_front = [i in front for i, _ in self.pairs]
+            self.tband = (f >= v360.PLATE_TIME_BAND[0]) & (f <= v360.PLATE_TIME_BAND[1])
+            self.lband = (f >= v360.PLATE_LEVEL_BAND[0]) & (f <= v360.PLATE_LEVEL_BAND[1])
+            lags = np.arange(-v360.PLATE_MAX_LAG, v360.PLATE_MAX_LAG + 1)
+            self.lag_ph = np.exp(2j * np.pi * f[self.tband][None, :] * lags[:, None] / FS)  # (lags, bins)
+        self.last_score = None
         self.E = [np.exp(2j * np.pi * f[None, :] * (tau[:, i] - tau[:, j])[:, None]).astype(np.complex64)
                   for i, j in self.pairs]
         # quiet frames' cross-spectra summed per second, for the background near any moment
@@ -494,12 +527,24 @@ class TalkerLocator:
         n = self.qn[s0:s1].sum()
         if n >= 20:
             R = R - self.qsum[s0:s1].sum(axis=0) / n
+        weight = [1.0] * len(self.pairs)
+        score = self.plate_score(R) if self.plates else None
+        self.last_score = score
+        if self.plates:
+            n_front = sum(self.on_front)
+            n_back = len(self.pairs) - n_front
+            wf = 1.0 if not n_back else (1 + score) / 2 / max(n_front, 1)
+            wb = 1.0 if not n_front else (1 - score) / 2 / max(n_back, 1)
+            weight = [wf if on else wb for on in self.on_front]
         grid = np.zeros(len(self.E[0]))
-        for (i, j), E in zip(self.pairs, self.E):
+        for (i, j), E, w in zip(self.pairs, self.E, weight):
             r = R[:, i, j]
-            grid += np.real(E @ (r / (np.abs(r) + 1e-12)).astype(np.complex64))
+            grid += w * np.real(E @ (r / (np.abs(r) + 1e-12)).astype(np.complex64))
         nel = len(self.els)
         grid = grid.reshape(360, nel)
+        if score is not None:
+            for e in range(nel):
+                grid[:, e] = v360.Model360.tilt(grid[:, e], score)
         g = int(np.argmax(grid))
         ka, ke = divmod(g, nel)
         elev = float(self.els[ke])
@@ -522,6 +567,24 @@ class TalkerLocator:
         if self.planar and abs(az) > 90:
             az = math.copysign(180 - abs(az), az)
         return float(az), (elev if nel > 1 else None), float(min(60.0, max(2.0, (hi - lo) / 2)))
+
+    def plate_score(self, R: np.ndarray) -> float:
+        """Front (+1) to back (-1) from the speech's cross-spectra (v360.Model360.plate_score on averaged
+        spectra): whether the back plate hears it later than the chest, over the delays sound bending round a
+        body can have, and how much quieter the back plate is above 1 kHz."""
+        front, back = self.plates
+        cc = np.zeros(self.lag_ph.shape[0])
+        for i in front:
+            for j in back:
+                cross = np.conj(R[self.tband, i, j])  # the back mic against the chest mic
+                cc += np.real(self.lag_ph @ (cross / (np.abs(cross) + 1e-12)))
+        lw = v360.PLATE_MAX_LAG
+        later, earlier = max(float(cc[lw + 1:].max()), 0.0), max(float(cc[:lw].max()), 0.0)
+        timing = (later - earlier) / (later + earlier + 1e-9)
+        p = np.real(np.einsum("fii->fi", R[self.lband]))
+        lvl = 10 * np.log10(np.maximum(p.sum(axis=0), 1e-12))
+        shadow = float(np.mean(lvl[back]) - np.mean(lvl[front]))
+        return 0.5 * timing + 0.5 * math.tanh(-shadow / v360.PLATE_SHADOW_DB)
 
 
 def talker_track(speech: np.ndarray, tl: TalkerLocator) -> tuple[list, np.ndarray]:
@@ -648,13 +711,18 @@ class Versions:
     """The live voice focus (MVDR toward the talker + direction filter + Wiener, learning as it goes), the
     previous one, and the versions they're compared with, all cut from the same 8 ms frames."""
 
-    def __init__(self, nch: int, ref: int, delays: callable, pos: np.ndarray, aimed: bool):
+    def __init__(self, nch: int, ref: int, delays: callable, pos: np.ndarray, aimed: bool, aim: np.ndarray | None = None):
         self.nch, self.ref, self.delays, self.aimed = nch, ref, delays, aimed
         self.win = np.sqrt(np.hanning(NFFT + 1)[:NFFT])
         self.f = np.fft.rfftfreq(NFFT, 1 / FS)
         F = len(self.f)
         self.beam, self.old = Learner(F, nch), Learner(F, nch)
-        self.direction = DirectionFilter(pos, self.f)
+        # with a body between the plates, the straight-line delays only hold on the plate facing the talker:
+        # delay-and-sum and the direction filter use that plate, each plate's filter learning on its own
+        plates = plates_of(pos) if aim is not None else None
+        self.groups = [np.array(g) for g in plates] if plates else [np.arange(nch)]
+        self.facing = (np.cos(np.radians(aim[:, 0])) < 0).astype(int) if plates else None
+        self.directions = [DirectionFilter(pos[g], self.f) for g in self.groups]
         self.focus_filter, self.old_filter, self.mic_filter = Wiener(F), Wiener(F), Wiener(F)
         self.learnt = 0
 
@@ -670,7 +738,9 @@ class Versions:
             X = np.fft.rfft(pad[s:s + NFFT] * self.win[:, None], axis=0)
             sp, qu = bool(det["speech"][k]), bool(det["quiet"][k])
             tau = self.delays(k)
-            g_dir, score = self.direction(X, tau, sp, qu)
+            face = int(self.facing[min(k, len(self.facing) - 1)]) if self.facing is not None else 0
+            g = self.groups[face]
+            g_dir, score = self.directions[face](X[:, g], tau[g], sp, qu)
             if not self.aimed:
                 g_dir, score = 1.0, None
             learn = sp and (score is None or score > ON_TARGET)
@@ -686,8 +756,8 @@ class Versions:
             Yr = self.mic_filter(Xr, qu)
             if not keep:
                 continue
-            ph = np.exp(2j * np.pi * self.f[:, None] * tau[None, :])
-            for key, Y in (("raw", X[:, self.ref]), ("avg", X.mean(axis=1)), ("das", np.mean(X * ph, axis=1)),
+            ph = np.exp(2j * np.pi * self.f[:, None] * tau[None, g])
+            for key, Y in (("raw", X[:, self.ref]), ("avg", X.mean(axis=1)), ("das", np.mean(X[:, g] * ph, axis=1)),
                            ("mvdr", Ym), ("filt", Yr), ("old", Yo), ("focus", Yf)):
                 if key in outs:
                     outs[key][s:s + NFFT] += np.fft.irfft(Y, NFFT) * w2
@@ -861,7 +931,13 @@ def resolve_model(name: str) -> str:
 
 
 def side(az) -> str:
-    return "" if az is None else ("straight ahead" if abs(az) < 3 else f"{abs(az):.0f}° {'left' if az > 0 else 'right'}")
+    if az is None:
+        return ""
+    if abs(az) < 3:
+        return "straight ahead"
+    if abs(az) > 177:
+        return "straight behind"
+    return f"{abs(az):.0f}° {'left' if az > 0 else 'right'}{', behind' if abs(az) > 90 else ''}"
 
 
 def write_transcript(out: Path, header: str, caps: list, model: str | None):
@@ -919,7 +995,7 @@ def process(path: Path, out_root: Path, args):
           + (f"\n  !! no sound on {', '.join(f'ch{c} ({geom[c][0]})' for c in dead)}: left out" if dead else ""), flush=True)
     if len(chans) < 2:
         raise SystemExit(f"{name}: fewer than two working mics")
-    write_wav(out / "raw_6mic.wav", audio)
+    write_wav(out / f"raw_{audio.shape[1]}mic.wav", audio)
 
     loc = Locator(geom, chans)
     dets = loc.stream(audio, args.threshold)
@@ -937,7 +1013,8 @@ def process(path: Path, out_root: Path, args):
     tl = TalkerLocator(x, geom, chans, det["speech"], det["quiet"])
     segs, aim = talker_track(det["speech"], tl)
     print(f"  speech in {det['speech'].mean() * 100:.0f}% of the take ({speech.mean() * 100:.0f}% loud), "
-          f"bangs/taps held {det['hold'].mean() * 100:.1f}%, {len(segs)} stretches located", flush=True)
+          f"bangs/taps held {det['hold'].mean() * 100:.1f}%, {len(segs)} stretches located"
+          + (f" ({sum(abs(s[2]) > 90 for s in segs)} behind)" if tl.plates else ""), flush=True)
     if args.ref in chans:
         ref = args.ref
     else:
@@ -946,7 +1023,7 @@ def process(path: Path, out_root: Path, args):
         ref = chans[int(np.argsort(bg)[(len(bg) - 1) // 2])]
 
     pos = np.array([geom[c][1:4] for c in chans]) / 1000.0
-    ver = Versions(len(chans), chans.index(ref), steering(geom, chans, aim), pos, aimed=bool(segs))
+    ver = Versions(len(chans), chans.index(ref), steering(geom, chans, aim), pos, aimed=bool(segs), aim=aim)
     warm = min(len(x), 20 * FS)  # a first pass learns the background and the talker, so the start is cleaned too
     ver.run(x[:warm], det, keep=False)
     ver.learnt = 0
@@ -959,7 +1036,7 @@ def process(path: Path, out_root: Path, args):
         xw = dereverb(x, args.taps, args.delay)
         print(f"  echo removal (WPE, {args.taps * HOP / FS * 1000:.0f} ms of echo, first "
               f"{args.delay * HOP / FS * 1000:.0f} ms kept): {time.time() - t1:.0f} s", flush=True)
-        ver_w = Versions(len(chans), chans.index(ref), steering(geom, chans, aim), pos, aimed=bool(segs))
+        ver_w = Versions(len(chans), chans.index(ref), steering(geom, chans, aim), pos, aimed=bool(segs), aim=aim)
         ver_w.run(xw[:warm], det, keep=False)
         outs_w = ver_w.run(xw, det, keys=[k for k, *_ in ECHO_VERSIONS])
         for k, row_key, *row in ECHO_VERSIONS:
@@ -1004,7 +1081,7 @@ def process(path: Path, out_root: Path, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("path", help="the card (or its takes/ folder), one take folder, or a 6-channel .wav")
+    ap.add_argument("path", help="the card (or its takes/ folder), one take folder, or a 6- or 8-channel .wav")
     ap.add_argument("--take", type=int, help="only this take number")
     ap.add_argument("--out", type=Path, default=OUT_ROOT, help=f"where to write (default {OUT_ROOT})")
     ap.add_argument("--model", default=DEFAULT_MODEL,
@@ -1030,7 +1107,7 @@ def main():
         return
     takes = find_takes(Path(args.path).expanduser(), args.take)
     if not takes:
-        raise SystemExit(f"no 6-mic takes found in {args.path}")
+        raise SystemExit(f"no 6- or 8-mic takes found in {args.path}")
     app = QGuiApplication.instance() or QGuiApplication([])  # noqa: F841  (QImage text needs it)
     for t in takes:
         process(t, args.out, args)

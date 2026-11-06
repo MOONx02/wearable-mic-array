@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Review 6-mic vest recordings (cam_mic_vest6) offline, and hear and see how well the noise is cancelled.
+"""Review 6- and 8-mic vest recordings (cam_mic_vest6, cam_mic_vest8) offline, and hear and see how well the
+noise is cancelled.
 
-    python3 tools/vest6_review.py                  takes in mic_takes/vest6/, takes/, mic_takes/vest6_*.wav
-                                                   and any card that's plugged in
+    python3 tools/vest6_review.py                  takes in mic_takes/vest6/, takes/, mic_takes/vest6_*.wav,
+                                                   mic_takes/vest8_*.wav and any card that's plugged in
     python3 tools/vest6_review.py path/to/folder   other folders: a card, copied take folders, recordings
 
 Pick a take on the left (unprocessed ones can be processed from here: tools/vest6_process.py). The camera
@@ -17,7 +18,7 @@ Highlights: Shift+drag on the timeline or the channels (or [ and ] while playing
 saves each one's audio (what you're listening to, at the volume you hear) and exactly what was said in it.
 Speech-to-text: Whisper small by default (about 1 GB while it runs); pick a bigger model on a faster
 computer. Transcribe again redoes only the transcript. Processing runs at low priority so the computer stays
-usable. Remove echo (on by default) takes the room's echo out of the six mics first (WPE) and adds two
+usable. Remove echo (on by default) takes the room's echo out of all the mics first (WPE) and adds two
 versions, "Raw mic, echo removed" and "Voice focus, echo removed"; the transcript is then made from the latter.
 
 Keys: space = play / pause, left / right = 2 s back / forward, A = raw mic <-> voice focus,
@@ -72,7 +73,7 @@ ROOT = HERE.parent
 PROCESS = HERE / "vest6_process.py"
 BG, PANEL, EDGE, INK, DIM = QColor("#0d1117"), QColor("#161b22"), QColor("#30363d"), QColor("#e6edf3"), QColor("#8b949e")
 GLOW, LOUD, TALKER, GOOD = QColor("#ffa657"), QColor("#ff7b72"), QColor("#58a6ff"), QColor("#3fb950")
-CH_COLORS = [QColor(c) for c in ("#58a6ff", "#f0883e", "#3fb950", "#d2a8ff", "#ff7b72", "#e3b341")]
+CH_COLORS = [QColor(c) for c in ("#58a6ff", "#f0883e", "#3fb950", "#d2a8ff", "#ff7b72", "#e3b341", "#79c0ff", "#56d4dd")]
 MUTED = "#8b949e"
 WINDOW_S = 8.0  # seconds shown in the spectrogram and channel views
 HOLD_S = 2.5
@@ -126,7 +127,11 @@ def draw_highlights(p: QPainter, spans: list, drag, xs, lo: float, hi: float, to
 def side(az) -> str:
     if az is None:
         return ""
-    return "straight ahead" if abs(az) < 3 else f"{abs(az):.0f}° {'left' if az > 0 else 'right'}"
+    if abs(az) < 3:
+        return "straight ahead"
+    if abs(az) > 177:
+        return "straight behind"
+    return f"{abs(az):.0f}° {'left' if az > 0 else 'right'}{', behind' if abs(az) > 90 else ''}"
 
 
 # ------------------------------------------------------------------ finding takes
@@ -134,7 +139,7 @@ def side(az) -> str:
 @dataclass
 class Take:
     name: str
-    raw: Path | None = None   # card take folder or 6-channel .wav
+    raw: Path | None = None   # card take folder or 6- / 8-channel .wav
     out: Path | None = None   # after vest6_process.py
     duration: float = 0.0
 
@@ -173,11 +178,11 @@ def scan(folders: list[Path]) -> list[Take]:
             if d.is_dir() and is_processed(d):
                 t = takes.setdefault(d.name, Take(d.name))
                 t.out = t.out or d
-            elif d.is_dir() and (d / "info.txt").exists() and sd.read_info(d).get("mics") == "6":
+            elif d.is_dir() and (d / "info.txt").exists() and sd.read_info(d).get("mics") in ("6", "8"):
                 t = takes.setdefault(d.name, Take(d.name))
                 t.raw = t.raw or d
                 t.duration = t.duration or float(sd.read_info(d).get("duration_s") or 0)
-            elif d.suffix.lower() == ".wav" and d.name.startswith("vest6_"):
+            elif d.suffix.lower() == ".wav" and d.name.startswith(("vest6_", "vest8_")) and not d.name.startswith("vest8_check"):
                 nch, dur = wav_info(d)
                 if nch >= 6:
                     t = takes.setdefault(d.stem, Take(d.stem))
@@ -283,7 +288,12 @@ class TakeData:
         out = take.out
         self.take = take
         self.rep = json.loads((out / "noise_report.json").read_text())
-        self.raw = load_wav(out / "raw_6mic.wav")
+        self.raw_name = "raw_8mic.wav" if (out / "raw_8mic.wav").exists() else "raw_6mic.wav"
+        self.raw = load_wav(out / self.raw_name)
+        layout = str(self.rep.get("layout", "vest6")).split(":")[0].strip()
+        geom = vp.v360.LAYOUTS.get(layout, vp.v360.LAYOUTS["vest6"])[1]
+        self.mic_names = [geom[c][0] if c in geom else f"ch{c}" for c in range(self.raw.shape[1])]
+        self.has_back = any(c in geom and geom[c][2] < -50 for c in self.rep.get("channels", []))  # a live back mic
         self.duration = len(self.raw) / FS
         self.versions = [(r["file"], r["name"]) for r in self.rep["rows"]]
         self.audio = {f: load_wav(out / f) for f, _ in self.versions}
@@ -366,7 +376,7 @@ class TakeData:
         open. Returns (path, gain dB, 1 ms blocks turned down)."""
         key = (fname, ch, auto, round(boost_db), taps)
         if key not in self._chan_wavs:
-            src = self.take.out / (fname or "raw_6mic.wav")
+            src = self.take.out / (fname or self.raw_name)
             tag = f"{fname[:-4] if fname else f'ch{ch}'}_{'a' if auto else 'm'}{round(boost_db):+d}{'_t' if taps else ''}"
             p = Path(tempfile.gettempdir()) / f"vest6_{self.take.name}_{tag}.wav"
             x = self.audio[fname][:, 0] if fname else self.raw[:, ch]
@@ -552,7 +562,7 @@ class NoisePanel(QWidget):
                    f"speech {rep['speech_s']:.1f} s · background measured over {rep['background_s']:.1f} s of quiet · "
                    f"voice band 300-3400 Hz")
         y += 22
-        cols = [("version", 0.0), ("background", 0.34), ("voice/noise", 0.48), ("echo (SRMR)", 0.62), ("vs raw mic", 0.76)]
+        cols = [("version", 0.0), ("bkg dB", 0.34), ("v/n dB", 0.48), ("echo", 0.62), ("vs raw mic", 0.76)]
         for name, fx in cols:
             p.drawText(QRectF(x0 + fx * (r.width() - 24), y, 120, 16), Qt.AlignmentFlag.AlignLeft, name)
         y += 20
@@ -586,8 +596,8 @@ class NoisePanel(QWidget):
             p.setFont(font(13, False, True))
             p.setPen(INK)
             mid = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            p.drawText(QRectF(x0 + 0.34 * (r.width() - 24), y, 100, rh - 4), mid, f"{row['background_dbfs']:.1f} dB")
-            p.drawText(QRectF(x0 + 0.48 * (r.width() - 24), y, 100, rh - 4), mid, f"{row['voice_to_noise_db']:.1f} dB")
+            p.drawText(QRectF(x0 + 0.34 * (r.width() - 24), y, 100, rh - 4), mid, f"{row['background_dbfs']:.1f}")
+            p.drawText(QRectF(x0 + 0.48 * (r.width() - 24), y, 100, rh - 4), mid, f"{row['voice_to_noise_db']:.1f}")
             p.drawText(QRectF(x0 + 0.62 * (r.width() - 24), y, 100, rh - 4), mid,
                        "—" if row.get("srmr") is None else f"{row['srmr']:.2f}")
             p.drawText(QRectF(bx + 6, y, 100, rh - 4), mid, "—" if not i else f"{gain:+.1f} dB")
@@ -612,6 +622,8 @@ class NoisePanel(QWidget):
         if rep["speech_s"] < 1.0:
             notes.append("Hardly any speech found: voice numbers are rough.")
         notes.append("Higher 'vs raw mic' = the voice stands out more. Listen too: a filter can sound watery.")
+        notes.append("bkg = background left (dBFS), v/n = voice over background. echo = SRMR over the speech, higher = "
+                     "less echo; it rises with any noise removal too, so compare a version with and without echo removed.")
         p.setFont(font(11))
         p.setPen(DIM)
         p.drawText(QRectF(x0, y, r.width() - 24, r.bottom() - y - 6), Qt.TextFlag.TextWordWrap, "\n".join(notes))
@@ -679,7 +691,7 @@ class WindowView(QWidget):
                     continue
                 p.fillRect(QRectF(xs(max(s, a)), bar_y, max(1.0, xs(min(e, b)) - xs(max(s, a))), 5), col)
         y += 10
-        rows = [(f"ch{c} {vp.v360.LAYOUTS['vest6'][1][c][0]}", c) for c in range(6)] + [(listen_name, -1)]
+        rows = [(f"ch{c} {name}", c) for c, name in enumerate(d.mic_names)] + [(listen_name, -1)]
         rh = (r.bottom() - 18 - y) / len(rows)
         e0, e1 = int(a * FS / ENV_BLOCK), int(b * FS / ENV_BLOCK)
         n = max(1, int(W))
@@ -766,16 +778,20 @@ class Timeline(QWidget):
             return
         plot = QRectF(r.x() + 60, r.y() + 22, r.width() - 70, r.height() - 40)
         xs = lambda t: plot.left() + t / max(d.duration, 1e-6) * plot.width()  # noqa: E731
-        ys = lambda az: plot.center().y() - max(-90.0, min(90.0, self.calib.rel(az))) / 90 * plot.height() / 2  # noqa: E731
+        span = 180.0 if d.has_back else 90.0  # with the back pair, the whole way round
+        ys = lambda az: plot.center().y() - max(-span, min(span, self.calib.rel(az))) / span * plot.height() / 2  # noqa: E731
         p.setPen(DIM)
         p.setFont(font(10))
-        for az, lbl in ((90, "90° L"), (0, "ahead"), (-90, "90° R")):
-            y = plot.center().y() - az / 90 * plot.height() / 2
+        marks = ((90, "90° L"), (0, "ahead"), (-90, "90° R"))
+        if d.has_back:
+            marks = ((180, "behind"),) + marks + ((-180, "behind"),)
+        for az, lbl in marks:
+            y = plot.center().y() - az / span * plot.height() / 2
             p.drawText(QRectF(r.x() + 4, y - 7, 54, 14), Qt.AlignmentFlag.AlignRight, lbl)
             p.setPen(QPen(EDGE, 1, Qt.PenStyle.DotLine))
             p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
             p.setPen(DIM)
-        half = self.calib.hfov / 2 / 90 * plot.height() / 2
+        half = self.calib.hfov / 2 / span * plot.height() / 2
         p.fillRect(QRectF(plot.left(), plot.center().y() - half, plot.width(), 2 * half), alpha(INK, 0.05))
         for spans, col in ((d.speech, alpha(TALKER, 0.7)), (d.background, alpha(DIM, 0.6))):
             for s, e in spans:
@@ -839,7 +855,7 @@ class Reviewer(QMainWindow):
         self.mark: float | None = None
         self.target_ms: int | None = None
         self._pos_ms, self._pos_wall = 0, time.monotonic()
-        self.setWindowTitle("Vest review · 6 mics")
+        self.setWindowTitle("Vest review · 6 or 8 mics")
         self.player = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_out)
@@ -870,7 +886,7 @@ class Reviewer(QMainWindow):
         self.transcribe_btn.setToolTip("Redo only the transcript of this take with the speech-to-text model above")
         self.transcribe_btn.clicked.connect(self._transcribe)
         self.echo_box = QCheckBox("Remove echo")
-        self.echo_box.setToolTip("When processing: take the room's echo out of the six mics first (WPE), then voice "
+        self.echo_box.setToolTip("When processing: take the room's echo out of all the mics first (WPE), then voice "
                                  "focus. Adds 'Raw mic, echo removed' and 'Voice focus, echo removed'; the transcript "
                                  "is made from the latter. About 5 s extra per minute of audio")
         self.echo_box.setChecked(self.prefs.value("dereverb", "true") in (True, "true", "1", 1))
@@ -907,7 +923,7 @@ class Reviewer(QMainWindow):
         self.time_lbl.setStyleSheet(f"color: {MUTED}; font-family: Menlo, monospace;")
         self.time_lbl.setFixedWidth(150)
         self.listen_box = QComboBox()
-        self.listen_box.setToolTip("What you hear. A = raw mic <-> voice focus, 1-6 = the versions")
+        self.listen_box.setToolTip("What you hear. A = raw mic <-> voice focus, 1-9 = the versions")
         self.listen_box.currentIndexChanged.connect(self._listen_changed)
         self.subs_box = QCheckBox("Subtitles")
         self.subs_box.setChecked(True)
@@ -1047,7 +1063,7 @@ class Reviewer(QMainWindow):
             self.current = None
             self._load(None)
             self.process_btn.setEnabled(False)
-            self.status.showMessage("No 6-mic takes found. Plug in the card, copy takes into takes/, or record with "
+            self.status.showMessage("No vest takes found. Plug in the card, copy takes into takes/, or record with "
                                     "mic_camera_view360.py, then Refresh.")
             return
         names = [t.name for t in self.takes]
@@ -1095,7 +1111,7 @@ class Reviewer(QMainWindow):
             self.hl_list.clear()
             return
         self.listen_box.addItems([f"{i + 1}. {n}" for i, (_, n) in enumerate(data.versions)]
-                                 + [f"Raw ch{c} only ({vp.v360.LAYOUTS['vest6'][1][c][0]})" for c in range(6)])
+                                 + [f"Raw ch{c} only ({name})" for c, name in enumerate(data.mic_names)])
         self.listen_box.setCurrentIndex(data.final_index())  # what the transcript was made from
         self.listen_box.blockSignals(False)
         for s, e, text, az, el in data.captions:
