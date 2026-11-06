@@ -98,7 +98,7 @@ VERSIONS = [
     ("beam_mvdr.wav", "MVDR beam", "voice focus without the filter"),
     ("mic_filter.wav", "Mic + filter", "one mic + the noise filter, no array"),
     ("voice_focus_old.wav", "Voice focus (old)", "before the tap guard, voice check and direction filter"),
-    ("voice_focus.wav", "Voice focus", "MVDR + direction filter + noise filter (live captions)"),
+    ("voice_focus.wav", "Voice focus", "live captions' MVDR + filters; the beam learns bangs too"),
 ]
 KEYS = ["raw", "avg", "das", "mvdr", "filt", "old", "focus"]
 # with --dereverb: the same chain again on the echo-removed mics (key in that run, row key, file, name, about)
@@ -120,6 +120,13 @@ HANG = 19            # frames after the last voiced one that still count as spee
 ON_TARGET = 0.3      # how much a frame must come from the talker's direction for the beam to learn it
 POST_FLOOR = 0.18    # the direction filter's deepest cut (-15 dB); with the noise filter, never below -20 dB
 TOTAL_FLOOR = 0.1
+FOCUS_MASK = "bangs"  # the beam also learns where bangs and taps come from (Versions). With T0024's taps mixed
+                      # into T0015: knocks left ~9 dB quieter, the steady background unchanged. On T0024 itself
+                      # (18% handling) taps ~9 dB quieter, but 3 dB more steady background: the beam gives up
+                      # some of the tapped mic. "presence" (learning the background per frequency from a
+                      # speech-presence mask) cut the voice along with it and transcribed worse, so it's off
+BANG_MIX = 1.0        # bangs weigh as much as the steady background in the beam ...
+BANG_FORGET = 0.995   # ... and fade by this every 8 ms frame without one (half in about a second)
 # speech-to-text models, smallest first: (Whisper model, what it's like, download size)
 DEFAULT_MODEL = "small.en"  # ~1 GB while it runs; bigger ones on request (--model, or the review app's list)
 TRANSCRIBERS = [
@@ -620,9 +627,12 @@ class Wiener:
         self.g = np.ones(nbins)
         self.post = np.ones(nbins)
 
-    def gain(self, Y: np.ndarray, quiet: bool) -> np.ndarray:
+    def gain(self, Y: np.ndarray, quiet: bool, noise_w: np.ndarray | None = None) -> np.ndarray:
+        """noise_w: learn the noise per bin by this weight (0-1) instead of on quiet frames."""
         P = np.abs(Y) ** 2
-        if quiet:
+        if noise_w is not None:
+            self.Pn += 0.02 * noise_w * (P - self.Pn)
+        elif quiet:
             self.Pn = 0.98 * self.Pn + 0.02 * P
         post = P / (self.Pn + 1e-12)
         prio = 0.98 * self.g ** 2 * self.post + 0.02 * np.maximum(post - 1, 0)
@@ -670,6 +680,26 @@ class DirectionFilter:
         return 1 - trust * (1 - g), score
 
 
+class SpeechPresence:
+    """Per frequency, the chance that someone is talking (Gerkmann & Hendriks 2012: a fixed 15 dB speech-to-
+    noise prior; the noise level follows whatever the chance says is noise, so it keeps up during speech)."""
+
+    XI = 10 ** 1.5
+
+    def __init__(self, F: int):
+        self.N, self.smooth = None, np.zeros(F)
+
+    def __call__(self, P: np.ndarray) -> np.ndarray:
+        if self.N is None:
+            self.N = P + 1e-12
+            return np.zeros(len(P))
+        p = 1 / (1 + (1 + self.XI) * np.exp(-np.minimum(P / self.N * self.XI / (1 + self.XI), 50)))
+        self.smooth = 0.9 * self.smooth + 0.1 * p
+        p = np.where(self.smooth > 0.99, np.minimum(p, 0.99), p)  # never certain for long, or the noise level sticks
+        self.N = 0.8 * self.N + 0.2 * ((1 - p) * P + p * self.N) + 1e-12
+        return p
+
+
 class Learner:
     """MVDR toward whatever the speech frames have in common, against the background of the quiet frames
     (mic_caption_view.StreamingFocus, any number of mics)."""
@@ -678,7 +708,8 @@ class Learner:
         self.nch = nch
         self.Rn = np.tile(np.eye(nch, dtype=complex) * 1e-6, (F, 1, 1))
         self.Rs = self.Rn.copy()
-        self.n_noise = self.n_speech = self.frames = 0
+        self.Rb = np.zeros_like(self.Rn)  # where bangs come from (step_masked)
+        self.n_noise = self.n_speech = self.frames = self.n_bangs = 0
         self.w = None
 
     def step(self, X: np.ndarray, quiet: bool, speech: bool) -> np.ndarray:
@@ -691,6 +722,30 @@ class Learner:
             else:
                 self.Rs = 0.98 * self.Rs + 0.02 * outer
                 self.n_speech += 1
+        return self._out(X)
+
+    def step_masked(self, X: np.ndarray, noise_w: np.ndarray, speech_w: np.ndarray | None, bang: bool = False) -> np.ndarray:
+        """The same, learning each frequency by how sure it is: the background by noise_w (0-1 per bin, 1 =
+        nobody talking), the talker by speech_w on the frames it may learn from (None = not this frame).
+        bang: this frame is a bang, tap or handling. Only where it came from is kept (each frequency scaled
+        to the same power), apart from the steady background, so a loud one can't drown that out; the beam
+        then works against the background plus BANG_MIX of it."""
+        self.frames += 1
+        outer = X[:, :, None] * X[:, None, :].conj()
+        if bang:
+            p = np.real(np.trace(outer, axis1=1, axis2=2))
+            self.Rb += 0.05 * (outer / (p + 1e-12)[:, None, None] - self.Rb)
+            self.n_bangs += 1
+        else:
+            self.Rb *= BANG_FORGET
+            self.Rn += (0.01 * noise_w)[:, None, None] * (outer - self.Rn)
+            self.n_noise += float(np.mean(noise_w))
+        if speech_w is not None:
+            self.Rs += (0.02 * speech_w)[:, None, None] * (outer - self.Rs)
+            self.n_speech += 1
+        return self._out(X)
+
+    def _out(self, X: np.ndarray) -> np.ndarray:
         if self.frames % 32 == 0 and self.n_noise > 100 and self.n_speech > 30:
             self._update_weights()
         return np.sum(X * self.w.conj(), axis=1) if self.w is not None else X.mean(axis=1)
@@ -699,6 +754,8 @@ class Learner:
         F, n = self.Rn.shape[0], self.nch
         tr = np.real(np.trace(self.Rn, axis1=1, axis2=2))
         Rn = self.Rn + np.eye(n)[None] * (1e-3 * tr / n + 1e-12)[:, None, None]
+        if self.n_bangs:
+            Rn = Rn + BANG_MIX * tr[:, None, None] * self.Rb
         vals, vecs = np.linalg.eig(np.linalg.solve(Rn, self.Rs))
         v = vecs[np.arange(F), :, np.argmax(vals.real, axis=1)]
         d = (Rn @ v[..., None])[..., 0]
@@ -711,8 +768,13 @@ class Versions:
     """The live voice focus (MVDR toward the talker + direction filter + Wiener, learning as it goes), the
     previous one, and the versions they're compared with, all cut from the same 8 ms frames."""
 
-    def __init__(self, nch: int, ref: int, delays: callable, pos: np.ndarray, aimed: bool, aim: np.ndarray | None = None):
-        self.nch, self.ref, self.delays, self.aimed = nch, ref, delays, aimed
+    def __init__(self, nch: int, ref: int, delays: callable, pos: np.ndarray, aimed: bool, aim: np.ndarray | None = None,
+                 mask: str | None = FOCUS_MASK):
+        """mask: how voice focus learns the background. None: on whole quiet frames, nothing during a bang.
+        With "presence" in it: every frame, each frequency by how unlikely it is that the talker is in it
+        (speech presence x the direction filter's talker score). With "bangs" in it: the beam also learns
+        where bangs, taps and handling (held, no voice) come from (see Learner.step_masked)."""
+        self.nch, self.ref, self.delays, self.aimed, self.mask = nch, ref, delays, aimed, mask
         self.win = np.sqrt(np.hanning(NFFT + 1)[:NFFT])
         self.f = np.fft.rfftfreq(NFFT, 1 / FS)
         F = len(self.f)
@@ -724,7 +786,39 @@ class Versions:
         self.facing = (np.cos(np.radians(aim[:, 0])) < 0).astype(int) if plates else None
         self.directions = [DirectionFilter(pos[g], self.f) for g in self.groups]
         self.focus_filter, self.old_filter, self.mic_filter = Wiener(F), Wiener(F), Wiener(F)
+        self.presence = SpeechPresence(F)
         self.learnt = 0
+
+    def focus(self, X: np.ndarray, k: int, det: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Voice focus for one frame: (the MVDR beam, the gain the filters put on it, the plate's mics, the
+        mics' delays toward the talker)."""
+        sp, qu = bool(det["speech"][k]), bool(det["quiet"][k])
+        tau = self.delays(k)
+        face = int(self.facing[min(k, len(self.facing) - 1)]) if self.facing is not None else 0
+        g = self.groups[face]
+        g_dir, score = self.directions[face](X[:, g], tau[g], sp, qu)
+        if not self.aimed:
+            g_dir, score = 1.0, None
+        learn = sp and (score is None or score > ON_TARGET)
+        self.learnt += learn
+        if self.mask:
+            bangs = "bangs" in self.mask
+            bang = bool(det["hold"][k]) and not bool(det["voiced"][k])
+            if "presence" in self.mask:
+                talker = np.clip((g_dir - POST_FLOOR) / (1 - POST_FLOOR), 0.0, 1.0)
+                m = self.presence(np.mean(np.abs(X) ** 2, axis=1)) * talker
+                noise_w = 1 - m
+            else:
+                m = np.ones(len(self.f))
+                noise_w = m * qu
+            if bang:  # the noise filter can't follow a bang (it learns over ~0.4 s); only the beam learns one
+                noise_w = np.zeros(len(m))
+            Ym = self.beam.step_masked(X, noise_w, m if learn else None, bang and bangs)
+            Ym[self.f < 70] = 0
+            return Ym, np.maximum(self.focus_filter.gain(Ym, qu, noise_w) * g_dir, TOTAL_FLOOR), g, tau
+        Ym = self.beam.step(X, qu, learn)
+        Ym[self.f < 70] = 0
+        return Ym, np.maximum(self.focus_filter.gain(Ym, qu) * g_dir, TOTAL_FLOOR), g, tau
 
     def run(self, x: np.ndarray, det: dict, keep: bool = True, keys: list[str] = KEYS) -> dict:
         n = len(x)
@@ -736,18 +830,9 @@ class Versions:
         for k in range(nfr):
             s = k * HOP
             X = np.fft.rfft(pad[s:s + NFFT] * self.win[:, None], axis=0)
-            sp, qu = bool(det["speech"][k]), bool(det["quiet"][k])
-            tau = self.delays(k)
-            face = int(self.facing[min(k, len(self.facing) - 1)]) if self.facing is not None else 0
-            g = self.groups[face]
-            g_dir, score = self.directions[face](X[:, g], tau[g], sp, qu)
-            if not self.aimed:
-                g_dir, score = 1.0, None
-            learn = sp and (score is None or score > ON_TARGET)
-            self.learnt += learn
-            Ym = self.beam.step(X, qu, learn)
-            Ym[low] = 0
-            Yf = Ym * np.maximum(self.focus_filter.gain(Ym, qu) * g_dir, TOTAL_FLOOR)
+            Ym, G, g, tau = self.focus(X, k, det)
+            Yf = Ym * G
+            qu = bool(det["quiet"][k])
             Yo = self.old.step(X, bool(det["quiet_e"][k]), bool(det["loud"][k]))
             Yo[low] = 0
             Yo = self.old_filter(Yo, bool(det["quiet_e"][k]))
