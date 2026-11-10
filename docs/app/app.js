@@ -1450,6 +1450,7 @@ const parser = new Parser({
       });
   },
   status(msg) {
+    logBoard(msg);
     if (msg.startsWith("stats: ")) boardStats = msg.slice(7);
     else if (msg.startsWith("firmware: ")) {
       boardFw = msg.slice(10);
@@ -3711,6 +3712,55 @@ $("thr").oninput = (e) => { S.thr = +e.target.value; save(); uiSync(); };
 $("layout").onchange = (e) => { S.layout = e.target.value; model.setGeom(PRESETS[S.layout].geom); save(); };
 $("res").onchange = (e) => conn?.send(new TextEncoder().encode(e.target.value));
 $("morebtn").onclick = () => { $("more").classList.toggle("open"); $("morebtn").classList.toggle("on"); setTimeout(resize, 0); };
+
+const boardLog = [];
+let logUnread = 0;
+function logBoard(msg) {
+  const now = new Date();
+  const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+  const kind = msg.startsWith("stats: ") ? "stats" : msg.startsWith("firmware: ") ? "fw"
+    : msg.startsWith("ERROR") ? "err" : msg.startsWith("rec:") ? "rec" : "note";
+  const last = boardLog[boardLog.length - 1];
+  if (kind === "fw" && boardLog.some((l) => l.kind === "fw" && l.msg === msg)) return;
+  if (kind === "stats" && last && last.kind === "stats") {
+    last.stamp = stamp;
+    last.msg = msg;
+  } else {
+    boardLog.push({ stamp, msg, kind });
+    if (boardLog.length > 300) boardLog.shift();
+    if (kind !== "stats" && kind !== "fw" && !$("logpane").classList.contains("open")) {
+      logUnread++;
+      $("logbtn").textContent = `Log ${logUnread}`;
+    }
+  }
+  $("loglatest").textContent = msg;
+  if ($("logpane").classList.contains("open")) paintLog();
+}
+function paintLog() {
+  const box = $("loglines");
+  const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.replaceChildren(...boardLog.map((l) => {
+    const row = document.createElement("div");
+    if (l.kind === "err" || l.kind === "rec") row.className = l.kind;
+    row.textContent = `${l.stamp}  ${l.msg}`;
+    return row;
+  }));
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+$("logbtn").onclick = () => {
+  const open = !$("logpane").classList.contains("open");
+  $("logpane").classList.toggle("open", open);
+  $("logbtn").classList.toggle("on", open);
+  logUnread = 0;
+  $("logbtn").textContent = "Log";
+  if (open) paintLog();
+};
+$("logclear").onclick = (e) => {
+  e.stopPropagation();
+  boardLog.length = 0;
+  $("loglines").replaceChildren();
+  $("loglatest").textContent = "nothing from the board yet";
+};
 $("rec").onclick = () => {
   const on = !$("rec").classList.contains("on");
   // 'v' = mics + the camera's picture, 'a' = mics only (the camera is off, so there's no picture to keep)

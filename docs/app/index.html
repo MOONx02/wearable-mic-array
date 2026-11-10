@@ -45,6 +45,19 @@
   #connect p { color: #8b949e; max-width: 520px; margin: 0; line-height: 1.45; }
   #connect .big { font-size: 18px; padding: 14px 28px; }
   #connect .err { color: #ff7b72; }
+  #logpane { display: none; position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 3;
+    max-height: min(240px, 42%); background: rgba(13, 17, 23, 0.94); border: 1px solid #30363d;
+    border-radius: 10px; flex-direction: column; overflow: hidden; }
+  #logpane.open { display: flex; }
+  #loghead { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: #8b949e; font-size: 12px; }
+  #loghead b { color: #e6edf3; }
+  #loglatest { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #loghead button { padding: 4px 8px; font-size: 12px; }
+  #loglines { margin: 0; padding: 0 10px 8px; overflow: auto; font: 12px ui-monospace, Menlo, monospace;
+    color: #c9d1d9; user-select: text; -webkit-user-select: text; }
+  #loglines div { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+  #loglines .err { color: #ff7b72; }
+  #loglines .rec { color: #56d4dd; }
 </style>
 </head>
 <body>
@@ -62,6 +75,7 @@
   <button id="swaplr">Swap L/R</button>
   <button id="swapfb">Swap F/B</button>
   <span class="grow"></span>
+  <button id="logbtn" title="Messages from the board: recording, the camera, the SD card">Log</button>
   <button id="morebtn">More</button>
   <button id="disconnect" title="Disconnect">✕</button>
 </div>
@@ -105,6 +119,10 @@
     <button id="demo">Demo (no board)</button>
     <a class="btn" href="update.html">Update the board's firmware</a>
     <p id="why"></p>
+  </div>
+  <div id="logpane">
+    <div id="loghead"><b>Board</b><span id="loglatest">nothing from the board yet</span><button id="logclear" type="button">Clear</button></div>
+    <div id="loglines"></div>
   </div>
 </div>
 <script src="app.js"></script>
