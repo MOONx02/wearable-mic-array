@@ -28,6 +28,9 @@
 //   repeats 'c'; with no 'c' for 5 s the camera comes back on.
 //   't' + 6 bytes (year-2000, month, day, hour, minute, second) = the computer's clock, in local time.
 //   The card has no clock of its own; without this, file dates show up as 1 Jan 1960.
+//   'W' + uint16 length + JSON = Wi-Fi and server settings, saved on the board. After a take, while it is
+//   not recording, the board joins that Wi-Fi and uploads the take in pieces. Audio and video are deleted
+//   from the card only when "del" is 1 and the server's stored size matches.
 // Mic packets: 'M' 'K', uint32 seq, uint16 frames, uint8 mask, uint8 0, int16 samples of the masked channels.
 //   'k' + one mask byte = stream only those channels (bit n = ch n), for hosts whose USB link can't carry
 //   all eight plus the camera. The host repeats it; with no 'k' for 5 s the board goes back to all eight.
@@ -52,7 +55,12 @@
 #include <sys/time.h>
 #include <time.h>
 #include <stdlib.h>
+#include <cstring>
 #include <atomic>
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
 
 #include "driver/i2s_pdm.h"
 #include "driver/usb_serial_jtag.h"
@@ -81,7 +89,7 @@ constexpr int SLOTS = 8;
 constexpr int CHANNELS = 8;
 constexpr uint8_t ALL_MICS = (1 << CHANNELS) - 1;
 constexpr const char *FIRMWARE = "cam_mic_vest8";
-constexpr int FIRMWARE_VERSION = 2;
+constexpr int FIRMWARE_VERSION = 3;
 constexpr const char *MIC_LAYOUT = "vest8: D1 ch0 inner R / ch1 inner L, D3 ch2 outer R / ch3 outer L, "
                                    "D4 ch4 top R / ch5 top L, D5 ch6 back R / ch7 back L (SEL 3V3 = right), clock D0";
 // x toward the wearer's left, y forward, z up (mm), per channel
@@ -98,6 +106,17 @@ constexpr size_t VIDEO_RING = 1 << 21;
 constexpr uint32_t PART_FRAMES = 30 * 60 * SAMPLE_RATE;
 constexpr uint32_t MIN_TAKE_FRAMES = SAMPLE_RATE / 2;  // shorter takes are glitches; they're deleted on stop
 constexpr size_t STAGE = 16384;
+
+struct NetCfg {
+  char ssid[33] = {};
+  char pass[65] = {};
+  char url[96] = {};
+  char token[80] = {};
+  bool del = false;
+  bool have = false;
+};
+static NetCfg net_cfg;
+static SemaphoreHandle_t net_mux;
 constexpr uint32_t DOUBLE_PRESS_MS = 500;
 // ------------------------------------------------------------------ single-producer / single-consumer ring
 
@@ -448,6 +467,20 @@ static void camera_task(void *) {
       if (ch == 'x') {
         escape_ms.store(millis());
         set_escape(true);
+        continue;
+      }
+      if (ch == 'W') {
+        uint8_t lh[2];
+        if (usb_serial_jtag_read_bytes(lh, 2, pdMS_TO_TICKS(100)) == 2) {
+          uint16_t n = lh[0] | (uint16_t)lh[1] << 8;
+          if (n > 0 && n <= 512) {
+            static char body[513];
+            if (usb_serial_jtag_read_bytes(reinterpret_cast<uint8_t *>(body), n, pdMS_TO_TICKS(400)) == n) {
+              body[n] = 0;
+              save_net(body);
+            }
+          }
+        }
         continue;
       }
       if (ch == 't') {
@@ -914,17 +947,225 @@ static void stop_take() {
   }
 }
 
+static void json_str(const char *json, const char *key, char *out, size_t n) {
+  char pat[24];
+  snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+  out[0] = 0;
+  const char *p = strstr(json, pat);
+  if (!p) return;
+  p += strlen(pat);
+  size_t i = 0;
+  while (*p && *p != '"' && i + 1 < n) {
+    if (*p == '\\' && p[1]) p++;
+    out[i++] = *p++;
+  }
+  out[i] = 0;
+}
+
+static void load_net() {
+  Preferences prefs;
+  if (!prefs.begin("vest", true)) return;
+  NetCfg cfg;
+  prefs.getString("ssid", cfg.ssid, sizeof(cfg.ssid));
+  prefs.getString("pass", cfg.pass, sizeof(cfg.pass));
+  prefs.getString("url", cfg.url, sizeof(cfg.url));
+  prefs.getString("token", cfg.token, sizeof(cfg.token));
+  cfg.del = prefs.getBool("del", false);
+  cfg.have = cfg.ssid[0] && cfg.url[0] && cfg.token[0];
+  prefs.end();
+  if (net_mux) xSemaphoreTake(net_mux, portMAX_DELAY);
+  net_cfg = cfg;
+  if (net_mux) xSemaphoreGive(net_mux);
+}
+
+static void save_net(const char *json) {
+  NetCfg cfg;
+  json_str(json, "ssid", cfg.ssid, sizeof(cfg.ssid));
+  json_str(json, "pass", cfg.pass, sizeof(cfg.pass));
+  json_str(json, "url", cfg.url, sizeof(cfg.url));
+  json_str(json, "token", cfg.token, sizeof(cfg.token));
+  size_t ulen = strlen(cfg.url);
+  while (ulen && cfg.url[ulen - 1] == '/') cfg.url[--ulen] = 0;
+  const char *del = strstr(json, "\"del\":");
+  cfg.del = del && del[6] == '1';
+  cfg.have = cfg.ssid[0] && cfg.url[0] && cfg.token[0];
+  Preferences prefs;
+  if (prefs.begin("vest", false)) {
+    prefs.putString("ssid", cfg.ssid);
+    prefs.putString("pass", cfg.pass);
+    prefs.putString("url", cfg.url);
+    prefs.putString("token", cfg.token);
+    prefs.putBool("del", cfg.del);
+    prefs.end();
+  }
+  if (net_mux) xSemaphoreTake(net_mux, portMAX_DELAY);
+  net_cfg = cfg;
+  if (net_mux) xSemaphoreGive(net_mux);
+  send_status(cfg.have ? "wifi: saved %s, upload %s" : "wifi: need a network name, server, and token",
+              cfg.ssid, cfg.del ? "then delete the card copy" : "and keep the card copy");
+}
+
+static int http_stored(const String &body) {
+  int i = body.indexOf("\"stored\":");
+  if (i < 0) return -1;
+  return body.substring(i + 9).toInt();
+}
+
+static int query_stored(const NetCfg &cfg, const char *take, const char *name) {
+  HTTPClient http;
+  http.setTimeout(15000);
+  http.setConnectTimeout(8000);
+  http.begin(String(cfg.url) + "/v1/takes/" + take + "/" + name);
+  http.addHeader("Authorization", String("Bearer ") + cfg.token);
+  int code = http.GET();
+  int stored = code == 200 ? http_stored(http.getString()) : -1;
+  http.end();
+  return stored;
+}
+
+static int post_piece(const NetCfg &cfg, const char *take, const char *name, uint32_t offset, const uint8_t *data, uint32_t n) {
+  HTTPClient http;
+  http.setTimeout(20000);
+  http.setConnectTimeout(8000);
+  http.begin(String(cfg.url) + "/v1/takes/" + take + "/" + name);
+  http.addHeader("Authorization", String("Bearer ") + cfg.token);
+  http.addHeader("X-Offset", String(offset));
+  http.addHeader("Content-Type", "application/octet-stream");
+  int code = http.POST(const_cast<uint8_t *>(data), n);
+  int stored = (code == 200) ? http_stored(http.getString()) : -1;
+  http.end();
+  return stored;
+}
+
+static bool upload_one(const NetCfg &cfg, const char *take, const char *name, bool required) {
+  char path[48];
+  snprintf(path, sizeof(path), "/takes/%s/%s", take, name);
+  if (!SD.exists(path)) return !required;
+  File file = SD.open(path, FILE_READ);
+  if (!file) return false;
+  uint32_t total = file.size();
+  int have = query_stored(cfg, take, name);
+  if (have < 0) { file.close(); return false; }
+  uint32_t stored = (uint32_t)have;
+  static uint8_t *piece = nullptr;
+  constexpr uint32_t PIECE = 65536;
+  if (!piece) piece = static_cast<uint8_t *>(heap_caps_malloc(PIECE, MALLOC_CAP_SPIRAM));
+  if (!piece) { file.close(); return false; }
+  uint32_t last_note = 0;
+  while (stored < total) {
+    if (rec_request.load()) { file.close(); return false; }
+    uint32_t n = min(PIECE, total - stored);
+    file.seek(stored);
+    if (file.read(piece, n) != n) { file.close(); return false; }
+    int got = post_piece(cfg, take, name, stored, piece, n);
+    if (got != (int)(stored + n)) { file.close(); return false; }
+    stored = (uint32_t)got;
+    if (millis() - last_note > 2000) {
+      last_note = millis();
+      send_status("upload: %s %s %lu/%lu KB", take, name, (unsigned long)(stored / 1024), (unsigned long)(total / 1024));
+    }
+    vTaskDelay(1);
+  }
+  file.close();
+  return true;
+}
+
+static bool take_complete(const char *take) {
+  char path[40];
+  snprintf(path, sizeof(path), "/takes/%s/info.txt", take);
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
+  char buf[400];
+  int n = f.read(reinterpret_cast<uint8_t *>(buf), sizeof(buf) - 1);
+  f.close();
+  if (n < 0) return false;
+  buf[n] = 0;
+  return strstr(buf, "complete=yes") != nullptr;
+}
+
+static void upload_idle() {
+  NetCfg cfg;
+  if (net_mux) xSemaphoreTake(net_mux, portMAX_DELAY);
+  cfg = net_cfg;
+  if (net_mux) xSemaphoreGive(net_mux);
+  if (!cfg.have || rec_request.load()) return;
+  static uint32_t retry_at = 0;
+  if (WiFi.status() != WL_CONNECTED) {
+    if ((int32_t)(millis() - retry_at) < 0) return;
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.begin(cfg.ssid, cfg.pass);
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) {
+      if (rec_request.load()) return;
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      retry_at = millis() + 20000;
+      send_status("upload: can't join %s", cfg.ssid);
+      return;
+    }
+    send_status("upload: joined %s", cfg.ssid);
+  }
+  static uint32_t next_scan = 0;
+  if ((int32_t)(millis() - next_scan) < 0) return;
+  if (!sd_mount()) return;
+  File root = SD.open("/takes");
+  if (!root) return;
+  for (File dir = root.openNextFile(); dir; dir = root.openNextFile()) {
+    if (rec_request.load()) return;
+    if (!dir.isDirectory()) continue;
+    const char *raw = dir.name();
+    const char *take = strrchr(raw, '/');
+    take = take ? take + 1 : raw;
+    if (take[0] != 'T') continue;
+    char receipt[40];
+    snprintf(receipt, sizeof(receipt), "/takes/%s/receipt.txt", take);
+    if (SD.exists(receipt) || !take_complete(take)) continue;
+    bool ok = upload_one(cfg, take, "info.txt", true) && upload_one(cfg, take, "audio_00.wav", true);
+    for (int i = 1; ok && i < 8; i++) {
+      char name[16];
+      snprintf(name, sizeof(name), "audio_%02d.wav", i);
+      ok = upload_one(cfg, take, name, false);
+    }
+    if (ok) ok = upload_one(cfg, take, "video.bin", false);
+    if (!ok) {
+      if (!rec_request.load()) send_status("upload: %s stopped, will retry", take);
+      next_scan = millis() + 20000;
+      return;
+    }
+    File rec = SD.open(receipt, FILE_WRITE);
+    if (rec) { rec.println("uploaded=yes"); rec.close(); }
+    if (cfg.del) {
+      SD.remove((String("/takes/") + take + "/audio_00.wav").c_str());
+      for (int i = 1; i < 8; i++) {
+        char path[48];
+        snprintf(path, sizeof(path), "/takes/%s/audio_%02d.wav", take, i);
+        SD.remove(path);
+      }
+      char video[40];
+      snprintf(video, sizeof(video), "/takes/%s/video.bin", take);
+      SD.remove(video);
+      send_status("upload: %s done, audio and video deleted", take);
+    } else send_status("upload: %s done, kept on the card", take);
+    return;
+  }
+  next_scan = millis() + 5000;
+}
+
 static void sd_task(void *) {
   vTaskDelay(pdMS_TO_TICKS(3000));  // so a laptop that just opened the port sees the result
   sd_mount();
   send_status("%s", sd_note);
+  load_net();
   while (true) {
     int req = rec_request.exchange(0);
     bool recording = take.number != 0;
     if (req == 3 && recording) stop_take();
     else if ((req == 1 || req == 2) && !recording) start_take(req == 2);
     if (take.number == 0) {
-      vTaskDelay(pdMS_TO_TICKS(20));
+      upload_idle();
+      vTaskDelay(pdMS_TO_TICKS(rec_request.load() ? 5 : 200));
       continue;
     }
     bool did = drain();
@@ -958,9 +1199,10 @@ static void fail(const char *what, esp_err_t err) {
 void setup() {
   usb_serial_jtag_driver_config_t usb_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
   usb_cfg.tx_buffer_size = USB_TX_BUFFER;
-  usb_cfg.rx_buffer_size = 256;
+  usb_cfg.rx_buffer_size = 1024;
   usb_serial_jtag_driver_install(&usb_cfg);
   usb_mux = xSemaphoreCreateMutex();
+  net_mux = xSemaphoreCreateMutex();
   escape_buf = static_cast<uint8_t *>(heap_caps_malloc(2 * (16 + MAX_JPEG), MALLOC_CAP_SPIRAM));
 
   pinMode(PIN_REC_BUTTON, INPUT_PULLUP);

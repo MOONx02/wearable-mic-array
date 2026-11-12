@@ -58,6 +58,15 @@
   #loglines div { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
   #loglines .err { color: #ff7b72; }
   #loglines .rec { color: #56d4dd; }
+  #netpane { display: none; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 8px 6px; color: #8b949e; }
+  #netpane.open { display: flex; }
+  #netpane input[type=text], #netpane input[type=password] {
+    background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+    padding: 6px 8px; font: inherit; width: 140px;
+    user-select: text; -webkit-user-select: text;
+  }
+  #netpane input.url { width: 240px; }
+  #netpane input.token { width: 200px; }
 </style>
 </head>
 <body>
@@ -78,6 +87,7 @@
   <button id="swapfb">Swap F/B</button>
   <span class="grow"></span>
   <button id="logbtn" title="Messages from the board: recording, the camera, the SD card">Log</button>
+  <button id="netbtn" title="Wi-Fi and server so the vest uploads a finished take by itself">Upload</button>
   <button id="morebtn">More</button>
   <button id="disconnect" title="Disconnect">✕</button>
 </div>
@@ -94,6 +104,14 @@
   <label title="The model that re-reads each sentence for better captions; bigger ones need a stronger computer">Speech <select id="stt"><option value="auto">Auto</option></select></label>
   <button id="rec" class="rec" title="Record to the board's microSD card: the mics, plus video while the camera is on">● Rec SD</button>
   <a class="btn" href="update.html" title="Flash new firmware onto the board over USB">Update firmware</a>
+</div>
+<div id="netpane">
+  <label>Wi-Fi <input id="wifiSsid" type="text" autocomplete="off" spellcheck="false"></label>
+  <label>Password <input id="wifiPass" type="password" autocomplete="off"></label>
+  <label>Server <input id="upUrl" class="url" type="text" autocomplete="off" spellcheck="false"></label>
+  <label>Token <input id="upToken" class="token" type="password" autocomplete="off"></label>
+  <label title="After the server confirms the size, delete the audio and video on the card. info.txt stays."><input id="upDel" type="checkbox"> Delete after upload</label>
+  <button id="netsave" type="button">Save to vest</button>
 </div>
 <div id="calbar">
   <b>Calibrate</b>

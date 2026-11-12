@@ -47,7 +47,8 @@ const PRESETS = {
 
 const S = Object.assign({ layout: "vest8", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
                           mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow",
-                          roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true, camOff: false },
+                          roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true, camOff: false,
+                          wifiSsid: "", wifiPass: "", upUrl: "http://187.77.27.36:8780", upToken: "", upDel: false },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
 if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
@@ -4246,6 +4247,48 @@ $("thr").oninput = (e) => { S.thr = +e.target.value; save(); uiSync(); };
 $("layout").onchange = (e) => { S.layout = e.target.value; model.setGeom(PRESETS[S.layout].geom); save(); };
 $("res").onchange = (e) => conn?.send(new TextEncoder().encode(e.target.value));
 $("morebtn").onclick = () => { $("more").classList.toggle("open"); $("morebtn").classList.toggle("on"); setTimeout(resize, 0); };
+function fillNet() {
+  $("wifiSsid").value = S.wifiSsid || "";
+  $("wifiPass").value = S.wifiPass || "";
+  $("upUrl").value = S.upUrl || "http://187.77.27.36:8780";
+  $("upToken").value = S.upToken || "";
+  $("upDel").checked = !!S.upDel;
+}
+$("netbtn").onclick = () => {
+  const open = !$("netpane").classList.contains("open");
+  $("netpane").classList.toggle("open", open);
+  $("netbtn").classList.toggle("on", open);
+  if (open) fillNet();
+  setTimeout(resize, 0);
+};
+$("netsave").onclick = () => {
+  S.wifiSsid = $("wifiSsid").value.trim();
+  S.wifiPass = $("wifiPass").value;
+  S.upUrl = $("upUrl").value.trim().replace(/\/+$/, "");
+  S.upToken = $("upToken").value.trim();
+  S.upDel = $("upDel").checked;
+  save();
+  if (!S.wifiSsid || !S.upUrl || !S.upToken) {
+    hint("The vest needs a Wi-Fi name, the server address, and the token.");
+    return;
+  }
+  if (!conn || conn instanceof DemoConn || connState !== "streaming") {
+    hint("Saved on this device. Connect the vest and press Save to vest again.");
+    return;
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify({
+    ssid: S.wifiSsid, pass: S.wifiPass, url: S.upUrl, token: S.upToken, del: S.upDel ? 1 : 0,
+  }));
+  if (bytes.length > 500) { hint("Those settings are too long for the vest."); return; }
+  const msg = new Uint8Array(3 + bytes.length);
+  msg[0] = 87;
+  msg[1] = bytes.length & 255;
+  msg[2] = (bytes.length >> 8) & 255;
+  msg.set(bytes, 3);
+  conn.send(msg);
+  hint(S.upDel ? "Sent. After a take, the vest uploads and then deletes the audio and video."
+               : "Sent. After a take, the vest uploads and leaves the card copy.");
+};
 
 const boardLog = [];
 let logUnread = 0;

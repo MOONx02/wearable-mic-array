@@ -1,12 +1,12 @@
 {
   "name": "cam_mic_vest8",
-  "version": 2,
-  "built": "2026-11-12T03:10Z",
+  "version": 3,
+  "built": "2026-11-12T04:13Z",
   "about": "8 mics: D1 inner pair, D3 outer pair, D4 top pair, D5 back pair (SEL 3V3 = right), clock D0, button D2",
   "parts": [
     {"file": "bootloader.bin", "address": 0, "size": 20224, "md5": "9bb30b8b89ec55b6f6abb252e3d27db2"},
     {"file": "partitions.bin", "address": 32768, "size": 3072, "md5": "801ba71678a964614657a6d8fbc6baca"},
     {"file": "boot_app0.bin", "address": 57344, "size": 8192, "md5": "e6327541e2dc394ca2c3b3280ac0f39f"},
-    {"file": "cam_mic_vest8.bin", "address": 65536, "size": 460736, "md5": "5dd2339bd90c3796b3b4b8b6ad0e318b"}
+    {"file": "cam_mic_vest8.bin", "address": 65536, "size": 1153632, "md5": "08d2a5e5a682b3c9b3ba54c492ec711a"}
   ]
 }
