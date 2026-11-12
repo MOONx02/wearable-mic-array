@@ -53,15 +53,18 @@ import struct  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
 import wave  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
+from datetime import datetime  # noqa: E402
 
 import numpy as np  # noqa: E402
-from PySide6.QtCore import QLineF, QPointF, QProcess, QRectF, QSettings, Qt, QTimer, QUrl, Signal, qInstallMessageHandler  # noqa: E402
+from PySide6.QtCore import QLineF, QPointF, QProcess, QRectF, QSettings, Qt, QThread, QTimer, QUrl, Signal, qInstallMessageHandler  # noqa: E402
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QImage, QKeySequence, QPainter, QPen, QShortcut, QTransform  # noqa: E402
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,  # noqa: E402
-                               QFormLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget)
 
 sys.path.insert(0, str(HERE))
@@ -142,18 +145,50 @@ class Take:
     raw: Path | None = None   # card take folder or 6- / 8-channel .wav
     out: Path | None = None   # after vest6_process.py
     duration: float = 0.0
+    when: str = ""            # wall-clock start, blank when the board had no clock
 
     @property
     def processed(self) -> bool:
         return self.out is not None
 
 
+def recorded_when(folder: Path) -> str:
+    """When the take started. A card file dated before 2024 is the unset board clock, which Finder shows as 1 Jan 1960."""
+    info = sd.read_info(folder) if (folder / "info.txt").exists() else {}
+    started = str(info.get("started") or "")
+    if started:
+        return started.replace("T", " ")
+    try:
+        ts = (folder / "info.txt").stat().st_mtime
+    except OSError:
+        return ""
+    if datetime.fromtimestamp(ts).year < 2024:
+        return ""
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
 def is_processed(d: Path) -> bool:
     return (d / "noise_report.json").exists() and (d / "voice_focus.wav").exists()
 
 
+def app_home() -> Path:
+    """Folder the app looks in for takes. A built app uses the folder it sits in."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parents[2].parent
+    return ROOT
+
+
+def server_takes_dir() -> Path:
+    """Takes pulled from the server. Vest Review lists this folder with the card."""
+    return Path.home() / "Library" / "Application Support" / "Vest Review" / "server"
+
+
 def default_folders() -> list[Path]:
-    return [vp.OUT_ROOT, ROOT / "takes", ROOT / "mic_takes", *sorted(Path("/Volumes").glob("*/takes"))]
+    home = app_home()
+    saved = Path.home() / "Library" / "Application Support" / "Vest Review" / "takes"
+    folders = [vp.OUT_ROOT, saved, server_takes_dir(), home, home / "takes", home / "mic_takes",
+               ROOT / "takes", ROOT / "mic_takes"]
+    return folders + sorted(Path("/Volumes").glob("*/takes"))
 
 
 def wav_info(p: Path) -> tuple[int, float]:
@@ -182,6 +217,7 @@ def scan(folders: list[Path]) -> list[Take]:
                 t = takes.setdefault(d.name, Take(d.name))
                 t.raw = t.raw or d
                 t.duration = t.duration or float(sd.read_info(d).get("duration_s") or 0)
+                t.when = t.when or recorded_when(d)
             elif d.suffix.lower() == ".wav" and d.name.startswith(("vest6_", "vest8_")) and not d.name.startswith("vest8_check"):
                 nch, dur = wav_info(d)
                 if nch >= 6:
@@ -432,7 +468,7 @@ class CameraView(QWidget):
         super().__init__()
         self.calib, self.data, self.t = calib, None, 0.0
         self.show_subs = self.show_overlay = True
-        self.setMinimumSize(420, 300)
+        self.setMinimumSize(240, 160)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -486,21 +522,23 @@ class CameraView(QWidget):
             a = d.aim_at(t)
             if a:
                 az, el, sig = a
-                rel = c.rel(az)
-                if abs(rel) <= c.hfov / 2:
-                    x, y = x_of(rel), y_of(el)
-                    hw = max(16.0, abs(x_of(rel + sig) - x_of(rel - sig)) / 2)
+                body = c.rel(az)
+                where = side(body)
+                if abs(body) <= c.hfov / 2:
+                    x, y = x_of(body), y_of(el)
+                    hw = max(16.0, abs(x_of(body + sig) - x_of(body - sig)) / 2)
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(alpha(TALKER, 0.18))
                     p.drawEllipse(QPointF(x, y), hw, hw)
                     p.setPen(QPen(TALKER, 3))
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.drawEllipse(QPointF(x, y), 18, 18)
-                    self.tag(p, pic, x + 24, y - 34, f"talker · {side(rel)}, {el:+.0f}° up · ±{sig:.0f}°", TALKER)
+                    self.tag(p, pic, x + 24, y - 34, f"talker · {where}, {el:+.0f}° up · ±{sig:.0f}°", TALKER)
                 else:
-                    left = rel > 0
-                    self.tag(p, pic, pic.left() + 8 if left else pic.right() - 8, pic.center().y(),
-                             f"{'◀ ' if left else ''}talker {side(rel)}{' ▶' if not left else ''}", TALKER, right=not left)
+                    on_left = body > 0
+                    self.tag(p, pic, pic.left() + 8 if on_left else pic.right() - 8, pic.center().y(),
+                             f"{'◀ ' if on_left else ''}talker {where}{' ▶' if not on_left else ''}",
+                             TALKER, right=not on_left)
         if self.show_subs:
             lines = [txt for s, e, txt, *_ in d.captions if s <= t <= e + 2.0][-2:]
             if lines:
@@ -541,7 +579,7 @@ class NoisePanel(QWidget):
     def __init__(self):
         super().__init__()
         self.data, self.listening = None, 0
-        self.setMinimumSize(380, 300)
+        self.setMinimumSize(240, 160)
         self.rows_y: list[tuple[float, float]] = []
 
     def paintEvent(self, _):
@@ -565,10 +603,11 @@ class NoisePanel(QWidget):
         cols = [("version", 0.0), ("bkg dB", 0.34), ("v/n dB", 0.48), ("echo", 0.62), ("vs raw mic", 0.76)]
         for name, fx in cols:
             p.drawText(QRectF(x0 + fx * (r.width() - 24), y, 120, 16), Qt.AlignmentFlag.AlignLeft, name)
-        y += 20
+        y += 18
         rows = rep["rows"]
         best = max(1.0, max(row["better_than_raw_db"] for row in rows))
-        rh = max(30.0, min(44.0, (r.bottom() - y - 120) / len(rows)))
+        footer = 88 if r.height() > 460 else 28
+        rh = max(20.0, min(36.0, (r.bottom() - y - footer) / max(len(rows), 1)))
         for i, row in enumerate(rows):
             box = QRectF(r.x() + 6, y, r.width() - 12, rh - 4)
             self.rows_y.append((y, y + rh))
@@ -586,14 +625,16 @@ class NoisePanel(QWidget):
                 p.drawRoundedRect(QRectF(bx, y + 6, max(2.0, bw * frac), rh - 16), 3, 3)
             name_w = 0.33 * (r.width() - 24)
             p.setPen(INK)
-            p.setFont(font(13, i == self.listening))
-            p.drawText(QRectF(x0, y, name_w, rh / 2 + 4), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+            p.setFont(font(12 if rh < 30 else 13, i == self.listening))
+            name_h = rh - 4 if rh < 32 else rh / 2 + 4
+            p.drawText(QRectF(x0, y, name_w, name_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        p.fontMetrics().elidedText(f"{i + 1}  {row['name']}", Qt.TextElideMode.ElideRight, int(name_w)))
-            p.setPen(DIM)
-            p.setFont(font(10))
-            p.drawText(QRectF(x0 + 16, y + rh / 2 + 2, name_w - 16, 14), Qt.AlignmentFlag.AlignLeft,
-                       p.fontMetrics().elidedText(row["about"], Qt.TextElideMode.ElideRight, int(name_w - 16)))
-            p.setFont(font(13, False, True))
+            if rh >= 32:
+                p.setPen(DIM)
+                p.setFont(font(10))
+                p.drawText(QRectF(x0 + 16, y + rh / 2 + 2, name_w - 16, 14), Qt.AlignmentFlag.AlignLeft,
+                           p.fontMetrics().elidedText(row["about"], Qt.TextElideMode.ElideRight, int(name_w - 16)))
+            p.setFont(font(12 if rh < 30 else 13, False, True))
             p.setPen(INK)
             mid = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             p.drawText(QRectF(x0 + 0.34 * (r.width() - 24), y, 100, rh - 4), mid, f"{row['background_dbfs']:.1f}")
@@ -602,6 +643,8 @@ class NoisePanel(QWidget):
                        "—" if row.get("srmr") is None else f"{row['srmr']:.2f}")
             p.drawText(QRectF(bx + 6, y, 100, rh - 4), mid, "—" if not i else f"{gain:+.1f} dB")
             y += rh
+        if y + 36 > r.bottom():
+            return
         row = rows[self.listening] if self.listening < len(rows) else None
         y += 8
         p.setFont(font(12, True))
@@ -645,7 +688,7 @@ class WindowView(QWidget):
         super().__init__()
         self.data, self.t, self.listen_file, self.listen_ch = None, 0.0, "voice_focus.wav", None
         self.drag = None
-        self.setMinimumHeight(330)
+        self.setMinimumHeight(150)
 
     def span(self) -> tuple[float, float]:
         d = self.data
@@ -765,7 +808,7 @@ class Timeline(QWidget):
         super().__init__()
         self.calib, self.data, self.t = calib, None, 0.0
         self.drag = None
-        self.setFixedHeight(120)
+        self.setFixedHeight(88)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -840,6 +883,166 @@ class Timeline(QWidget):
             self.update()
 
 
+UPLOAD_URL = "http://187.77.27.36:8780"
+UPLOAD_PIECE = 256 * 1024
+
+
+def upload_token() -> str:
+    path = Path.home() / ".config" / "vest-takes" / "token"
+    if path.is_file():
+        return path.read_text(encoding="utf-8").strip().splitlines()[0]
+    return ""
+
+
+class Uploader(QThread):
+    """Send a raw take in pieces. Deletes audio and video only when asked and the sizes match."""
+
+    note = Signal(str)
+    finished_ok = Signal(bool, str)
+
+    def __init__(self, folder: Path, delete: bool, url: str, token: str):
+        super().__init__()
+        self.folder = folder
+        self.delete = delete
+        self.url = url.rstrip("/")
+        self.token = token
+
+    def run(self):
+        try:
+            self._run()
+        except Exception as e:  # noqa: BLE001
+            self.finished_ok.emit(False, str(e))
+
+    def _request(self, method: str, path: str, data: bytes | None = None, offset: int | None = None) -> dict:
+        req = urllib.request.Request(self.url + path, data=data, method=method)
+        req.add_header("Authorization", "Bearer " + self.token)
+        if offset is not None:
+            req.add_header("X-Offset", str(offset))
+        try:
+            with urllib.request.urlopen(req, timeout=120) as res:
+                return json.loads(res.read().decode())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            raise RuntimeError(detail or f"HTTP {e.code}") from e
+
+    def _send_file(self, path: Path):
+        size = path.stat().st_size
+        name = path.name
+        stored = int(self._request("GET", f"/v1/takes/{self.folder.name}/{name}").get("stored") or 0)
+        with path.open("rb") as f:
+            while stored < size:
+                f.seek(stored)
+                chunk = f.read(min(UPLOAD_PIECE, size - stored))
+                if not chunk:
+                    break
+                reply = self._request("POST", f"/v1/takes/{self.folder.name}/{name}", chunk, stored)
+                got = int(reply.get("stored") or 0)
+                if got != stored + len(chunk):
+                    raise RuntimeError(reply.get("error") or f"{name} stopped at {got} bytes")
+                stored = got
+                self.note.emit(f"Uploading {self.folder.name}/{name}  {stored}/{size}")
+        if stored != size:
+            raise RuntimeError(f"{name}: server has {stored} bytes, the file is {size}")
+
+    def _run(self):
+        if not self.url or not self.token:
+            raise RuntimeError("Set the server address and token in Server…")
+        files = [self.folder / "info.txt"] if (self.folder / "info.txt").is_file() else []
+        files += sorted(self.folder.glob("audio_*.wav"))
+        if (self.folder / "video.bin").is_file():
+            files.append(self.folder / "video.bin")
+        if not files:
+            raise RuntimeError("nothing to upload")
+        for path in files:
+            self._send_file(path)
+        if not self.delete:
+            self.finished_ok.emit(True, f"{self.folder.name} uploaded. The card copy is still there.")
+            return
+        big = [p for p in files if p.name != "info.txt"]
+        receipt = self.folder / "receipt.txt"
+        receipt.write_text("".join(f"{p.name}={p.stat().st_size}\n" for p in big), encoding="utf-8")
+        self._send_file(receipt)
+        for path in big:
+            path.unlink()
+        self.finished_ok.emit(True, f"{self.folder.name} uploaded. Audio and video were deleted from the card.")
+
+
+class Puller(QThread):
+    """Download takes the server has into the local server folder."""
+
+    note = Signal(str)
+    finished_ok = Signal(bool, str)
+
+    def __init__(self, dest: Path, url: str, token: str):
+        super().__init__()
+        self.dest = dest
+        self.url = url.rstrip("/")
+        self.token = token
+
+    def run(self):
+        try:
+            self._run()
+        except Exception as e:  # noqa: BLE001
+            self.finished_ok.emit(False, str(e))
+
+    def _open(self, path: str):
+        req = urllib.request.Request(self.url + path)
+        req.add_header("Authorization", "Bearer " + self.token)
+        try:
+            return urllib.request.urlopen(req, timeout=120)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            raise RuntimeError(detail or f"HTTP {e.code}") from e
+
+    def _json(self, path: str) -> dict:
+        with self._open(path) as res:
+            return json.loads(res.read().decode())
+
+    def _read(self, path: str, offset: int, n: int) -> bytes:
+        with self._open(f"{path}?offset={offset}&n={n}") as res:
+            data = res.read()
+        return data
+
+    def _pull_file(self, take: str, name: str, size: int) -> bool:
+        dest = self.dest / take / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        have = dest.stat().st_size if dest.is_file() else 0
+        if have >= size:
+            return False
+        with dest.open("r+b" if dest.exists() else "wb") as out:
+            while have < size:
+                n = min(UPLOAD_PIECE, size - have)
+                data = self._read(f"/v1/takes/{take}/{name}", have, n)
+                if not data:
+                    raise RuntimeError(f"{take}/{name} stopped at {have} of {size}")
+                out.seek(have)
+                out.write(data)
+                have += len(data)
+                self.note.emit(f"Pulling {take}/{name}  {have}/{size}")
+        if dest.stat().st_size != size:
+            raise RuntimeError(f"{take}/{name}: got {dest.stat().st_size} bytes, the server has {size}")
+        return True
+
+    def _run(self):
+        if not self.url or not self.token:
+            raise RuntimeError("Set the server address and token in Server…")
+        listing = self._json("/v1/takes")
+        takes = listing.get("takes") or []
+        if not takes:
+            self.finished_ok.emit(True, "The server has no takes yet.")
+            return
+        changed = 0
+        for item in takes:
+            take = item["take"]
+            for name, size in sorted(item.get("files") or {}.items()):
+                if self._pull_file(take, name, int(size)):
+                    changed += 1
+        if changed:
+            self.finished_ok.emit(True, f"Pulled {changed} file{'s' if changed != 1 else ''} from the server.")
+        else:
+            self.finished_ok.emit(True, "The server copies here are already up to date.")
+
+
 # ------------------------------------------------------------------ window
 
 class Reviewer(QMainWindow):
@@ -854,8 +1057,10 @@ class Reviewer(QMainWindow):
         self.pending_pos: int | None = None
         self.mark: float | None = None
         self.target_ms: int | None = None
+        self.uploader = None
+        self.puller = None
         self._pos_ms, self._pos_wall = 0, time.monotonic()
-        self.setWindowTitle("Vest review · 6 or 8 mics")
+        self.setWindowTitle("Vest review")
         self.player = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_out)
@@ -867,6 +1072,9 @@ class Reviewer(QMainWindow):
         self.process_btn.clicked.connect(self._process)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(lambda: self.refresh())
+        open_btn = QPushButton("Open…")
+        open_btn.setToolTip("Open one take, or a folder of takes")
+        open_btn.clicked.connect(self._open_folder)
         files = QPushButton("Show files")
         files.clicked.connect(self._show_files)
         self.prefs = QSettings("CapstoneMicArray", "vest6_review")
@@ -880,7 +1088,7 @@ class Reviewer(QMainWindow):
         self.stt_box.setCurrentIndex(max(0, self.stt_box.findData(self.prefs.value("stt", vp.DEFAULT_MODEL))))
         self.stt_box.currentIndexChanged.connect(lambda _: self.prefs.setValue("stt", self.stt_box.currentData()))
         self.stt_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.stt_box.setMinimumContentsLength(12)
+        self.stt_box.setMinimumContentsLength(8)
         self.stt_box.view().setMinimumWidth(460)
         self.transcribe_btn = QPushButton("Transcribe again")
         self.transcribe_btn.setToolTip("Redo only the transcript of this take with the speech-to-text model above")
@@ -897,10 +1105,29 @@ class Reviewer(QMainWindow):
         lv.addWidget(self._heading("Takes"))
         lv.addWidget(self.take_list, 1)
         row = QHBoxLayout()
-        for b in (self.process_btn, refresh, files):
+        for b in (self.process_btn, refresh, open_btn, files):
             row.addWidget(b)
         lv.addLayout(row)
         lv.addWidget(self.echo_box)
+        self.upload_btn = QPushButton("Upload")
+        self.upload_btn.setToolTip("Send this take to the server in pieces")
+        self.upload_btn.clicked.connect(self._upload)
+        self.pull_btn = QPushButton("Pull")
+        self.pull_btn.setToolTip("Download takes from the server into this list")
+        self.pull_btn.clicked.connect(self._pull)
+        self.server_btn = QPushButton("Server…")
+        self.server_btn.setToolTip("Server address and token")
+        self.server_btn.clicked.connect(self._server_settings)
+        self.delete_box = QCheckBox("Delete after upload")
+        self.delete_box.setToolTip("After the server confirms the size, delete the audio and video on the card. "
+                                   "info.txt stays, with a receipt, so the take number is not used again")
+        self.delete_box.setChecked(self.prefs.value("delete_after_upload", False) in (True, "true", "1", 1))
+        self.delete_box.toggled.connect(lambda on: self.prefs.setValue("delete_after_upload", on))
+        net = QHBoxLayout()
+        for b in (self.upload_btn, self.pull_btn, self.server_btn):
+            net.addWidget(b)
+        lv.addLayout(net)
+        lv.addWidget(self.delete_box)
         lv.addWidget(QLabel("Speech-to-text:"))
         lv.addWidget(self.stt_box)
         lv.addWidget(self.transcribe_btn)
@@ -924,6 +1151,8 @@ class Reviewer(QMainWindow):
         self.time_lbl.setFixedWidth(150)
         self.listen_box = QComboBox()
         self.listen_box.setToolTip("What you hear. A = raw mic <-> voice focus, 1-9 = the versions")
+        self.listen_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.listen_box.setMinimumContentsLength(10)
         self.listen_box.currentIndexChanged.connect(self._listen_changed)
         self.subs_box = QCheckBox("Subtitles")
         self.subs_box.setChecked(True)
@@ -932,6 +1161,11 @@ class Reviewer(QMainWindow):
         self.overlay_box.setChecked(True)
         self.overlay_box.toggled.connect(lambda on: (setattr(self.camera, "show_overlay", on), self.camera.update()))
         truth = lambda v: v in (True, "true", "1", 1)  # noqa: E731
+        self.mirror_box = QCheckBox("Mirror")
+        self.mirror_box.setToolTip("Flip the camera picture left to right. The voice-focus mark and the left/right words stay yours.")
+        self.mirror_box.setChecked(truth(self.prefs.value("mirror", self.calib.mirror)))
+        self.calib.mirror = self.mirror_box.isChecked()
+        self.mirror_box.toggled.connect(self._mirror)
         self.auto_box = QCheckBox("Auto volume")
         self.auto_box.setToolTip("Raise what you hear until the voice is at a comfortable level")
         self.auto_box.setChecked(truth(self.prefs.value("auto", "true")))
@@ -956,27 +1190,31 @@ class Reviewer(QMainWindow):
         self.save_btn.setToolTip("Save the whole take as a WAV file, exactly as you hear it "
                                  "(this version, with Auto volume, Boost and Remove taps)")
         self.save_btn.clicked.connect(self._save_audio)
-        for w in (self.auto_box, self.boost, self.taps_box, self.save_btn):  # keep space and the arrow keys for playback
+        for w in (self.auto_box, self.boost, self.taps_box, self.save_btn,
+                  self.subs_box, self.overlay_box, self.mirror_box):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        controls = QHBoxLayout()
-        controls.addWidget(self.play_btn)
-        controls.addWidget(self.slider, 1)
-        controls.addWidget(self.time_lbl)
-        controls.addWidget(QLabel("Listen:"))
-        controls.addWidget(self.listen_box)
-        controls.addWidget(self.auto_box)
-        controls.addWidget(QLabel("Boost:"))
-        controls.addWidget(self.boost)
-        controls.addWidget(self.boost_lbl)
-        controls.addWidget(self.taps_box)
-        controls.addWidget(self.save_btn)
-        controls.addWidget(self.subs_box)
-        controls.addWidget(self.overlay_box)
+        play_row = QHBoxLayout()
+        play_row.addWidget(self.play_btn)
+        play_row.addWidget(self.slider, 1)
+        play_row.addWidget(self.time_lbl)
+        play_row.addWidget(QLabel("Listen:"))
+        play_row.addWidget(self.listen_box, 1)
+        opt_row = QHBoxLayout()
+        for w in (self.auto_box, QLabel("Boost:"), self.boost, self.boost_lbl, self.taps_box,
+                  self.save_btn, self.subs_box, self.overlay_box, self.mirror_box):
+            opt_row.addWidget(w)
+        opt_row.addStretch(1)
+        controls = QVBoxLayout()
+        controls.setSpacing(4)
+        controls.addLayout(play_row)
+        controls.addLayout(opt_row)
         top = QSplitter()
         top.addWidget(self.camera)
         top.addWidget(self.noise)
         top.setStretchFactor(0, 3)
         top.setStretchFactor(1, 2)
+        top.setChildrenCollapsible(False)
+        self._top = top
         mid = QWidget()
         mv = QVBoxLayout(mid)
         mv.setContentsMargins(0, 0, 0, 0)
@@ -1020,9 +1258,12 @@ class Reviewer(QMainWindow):
         split = QSplitter()
         for w in (left, mid, right):
             split.addWidget(w)
+        split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
-        split.setSizes([220, 1200, 260])
+        split.setStretchFactor(2, 0)
+        split.setChildrenCollapsible(False)
         self.setCentralWidget(split)
+        self._split = split
         self.status = self.statusBar()
         self.player.playbackStateChanged.connect(
             lambda s: self.play_btn.setText("Pause" if s == QMediaPlayer.PlaybackState.PlayingState else "Play"))
@@ -1040,6 +1281,11 @@ class Reviewer(QMainWindow):
         self.timer.start(33)
         self.refresh()
 
+    def _mirror(self, on: bool):
+        self.calib.mirror = bool(on)
+        self.prefs.setValue("mirror", bool(on))
+        self.camera.update()
+
     @staticmethod
     def _heading(text: str) -> QLabel:
         lbl = QLabel(text)
@@ -1054,7 +1300,8 @@ class Reviewer(QMainWindow):
         self.take_list.blockSignals(True)
         self.take_list.clear()
         for t in self.takes:
-            item = QListWidgetItem(f"{t.name}   {t.duration:.1f} s" + ("" if t.processed else "\nnot processed yet"))
+            item = QListWidgetItem(f"{t.name}{('   ' + t.when) if t.when else ''}   {t.duration:.1f} s"
+                                    + ("" if t.processed else "\nnot processed yet"))
             if not t.processed:
                 item.setForeground(QColor(MUTED))
             self.take_list.addItem(item)
@@ -1063,6 +1310,8 @@ class Reviewer(QMainWindow):
             self.current = None
             self._load(None)
             self.process_btn.setEnabled(False)
+            self.upload_btn.setEnabled(False)
+            self.pull_btn.setEnabled(self.puller is None and self.uploader is None and self.proc is None)
             self.status.showMessage("No vest takes found. Plug in the card, copy takes into takes/, or record with "
                                     "mic_camera_view360.py, then Refresh.")
             return
@@ -1075,7 +1324,10 @@ class Reviewer(QMainWindow):
         if not 0 <= row < len(self.takes):
             return
         t = self.current = self.takes[row]
-        self.process_btn.setEnabled(t.raw is not None and self.proc is None)
+        busy = self.proc is not None or self.uploader is not None or self.puller is not None
+        self.process_btn.setEnabled(t.raw is not None and not busy)
+        self.upload_btn.setEnabled(isinstance(t.raw, Path) and t.raw.is_dir() and not busy)
+        self.pull_btn.setEnabled(not busy)
         self.transcribe_btn.setEnabled(t.processed and self.proc is None)
         self.process_btn.setText("Process again" if t.processed else "Process")
         if not t.processed:
@@ -1143,9 +1395,80 @@ class Reviewer(QMainWindow):
         self.proc.readyReadStandardOutput.connect(self._process_output)
         self.proc.finished.connect(lambda code, _: self._process_done(t.name, code))
         self.process_btn.setEnabled(False)
+        self.upload_btn.setEnabled(False)
+        self.pull_btn.setEnabled(False)
         self.transcribe_btn.setEnabled(False)
         self.status.showMessage(note)
-        self.proc.start(sys.executable, [str(PROCESS), *args, "--model", self.stt_box.currentData(), "--low-priority"])
+        self.proc.start(sys.executable, ([ "--process-worker"] if getattr(sys, "frozen", False) else [str(PROCESS)])
+                        + [*args, "--model", self.stt_box.currentData(), "--low-priority"])
+
+    def _upload(self):
+        t = self.current
+        if not t or not isinstance(t.raw, Path) or not t.raw.is_dir() or self.uploader or self.puller or self.proc:
+            return
+        job = Uploader(t.raw, self.delete_box.isChecked(), self._server_url(), self._server_token())
+        job.note.connect(self.status.showMessage)
+        job.finished_ok.connect(lambda ok, msg, name=t.name: self._upload_done(name, ok, msg))
+        self.uploader = job
+        self.upload_btn.setEnabled(False)
+        self.pull_btn.setEnabled(False)
+        self.process_btn.setEnabled(False)
+        self.status.showMessage(f"Uploading {t.name}…")
+        job.start()
+
+    def _upload_done(self, name: str, ok: bool, msg: str):
+        self.uploader = None
+        self.refresh(select=name)
+        self.status.showMessage(msg if ok else f"Upload failed: {msg}")
+
+    def _server_url(self) -> str:
+        url = str(self.prefs.value("server_url", "") or "").strip().rstrip("/")
+        return url or UPLOAD_URL
+
+    def _server_token(self) -> str:
+        stored = self.prefs.value("server_token")
+        if stored is None:
+            return upload_token()
+        return str(stored).strip()
+
+    def _server_settings(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Server")
+        form = QFormLayout(dlg)
+        url = QLineEdit(self._server_url())
+        token = QLineEdit(self._server_token())
+        url.setMinimumWidth(360)
+        token.setMinimumWidth(360)
+        form.addRow("Address", url)
+        form.addRow("Token", token)
+        note = QLabel("Pull downloads every take on the server. Upload sends the take you have selected.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec():
+            self.prefs.setValue("server_url", url.text().strip().rstrip("/"))
+            self.prefs.setValue("server_token", token.text().strip())
+
+    def _pull(self):
+        if self.puller or self.uploader or self.proc:
+            return
+        job = Puller(server_takes_dir(), self._server_url(), self._server_token())
+        job.note.connect(self.status.showMessage)
+        job.finished_ok.connect(self._pull_done)
+        self.puller = job
+        self.pull_btn.setEnabled(False)
+        self.upload_btn.setEnabled(False)
+        self.process_btn.setEnabled(False)
+        self.status.showMessage("Pulling takes from the server…")
+        job.start()
+
+    def _pull_done(self, ok: bool, msg: str):
+        self.puller = None
+        self.refresh()
+        self.status.showMessage(msg if ok else f"Pull failed: {msg}")
 
     # ---------------------------------------------------------------- highlights
 
@@ -1324,6 +1647,12 @@ class Reviewer(QMainWindow):
         if code:
             self.status.showMessage(f"processing {name} failed (exit {code}): run tools/vest6_process.py in a terminal to see why")
 
+    def _open_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Open a take, or a folder of takes")
+        if path:
+            self.folders.append(Path(path))
+            self.refresh(select=Path(path).name)
+
     def _show_files(self):
         t = self.current
         path = t and (t.out or t.raw)
@@ -1440,7 +1769,14 @@ def quiet_qt_messages(mode, context, message):
 
 
 def main():
-    folders = [Path(a).expanduser() for a in sys.argv[1:]] or default_folders()
+    if len(sys.argv) > 1 and sys.argv[1] == "--process-worker":
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
+        vp.main()
+        return
+    if getattr(sys, "frozen", False):
+        vp.OUT_ROOT = Path.home() / "Library" / "Application Support" / "Vest Review" / "takes"
+        vp.OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    folders = [Path(a).expanduser() for a in sys.argv[1:] if not a.startswith("-psn")] or default_folders()
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     qInstallMessageHandler(quiet_qt_messages)
     app = QApplication(sys.argv[:1])
@@ -1455,7 +1791,10 @@ def main():
                       "QListWidget::item:selected { background: #1f6feb; color: white; }"
                       "QStatusBar { color: #8b949e; font-size: 12px; }")
     screen = app.primaryScreen().availableGeometry()
-    win.resize(int(screen.width() * 0.95), int(screen.height() * 0.92))
+    win.setGeometry(screen)
+    left_w, right_w = 188, 200
+    win._split.setSizes([left_w, max(640, screen.width() - left_w - right_w), right_w])
+    win._top.setSizes([int(screen.width() * 0.42), int(screen.width() * 0.28)])
     win.show()
     sys.exit(app.exec())
 

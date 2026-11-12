@@ -1065,7 +1065,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v25";
+const APP_VERSION = "v31";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -1161,14 +1161,14 @@ class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
   }
 }
 
-class WsConn {  // tools/ws_bridge.py, or a Wi-Fi firmware later
-  constructor(url) { this.url = url; this.name = "Wi-Fi"; }
+class WsConn {  // mic_array_app.py (the laptop app: it reads the board's USB and passes the bytes on), or Wi-Fi later
+  constructor(url, name = "Wi-Fi", waiting = "connecting…") { this.url = url; this.name = name; this.waiting = waiting; }
   async open() {}
   run(onData, onState) {
     return new Promise((resolve) => {
       const connect = () => {
         if (this.closed) return resolve();
-        onState("connecting…");
+        onState(this.waiting);
         const ws = new WebSocket(this.url);
         ws.binaryType = "arraybuffer";
         ws.onopen = () => onState("streaming");
@@ -1691,6 +1691,10 @@ const FWIN = Float64Array.from({ length: FN }, (_, i) => Math.sqrt(0.5 - 0.5 * M
 // for consonants), and, once the talker stands out from the background, only frames from their direction.
 const ONSET_DB = 12, SPREAD_DB = 12, HOLD = 15, HOLD_MAX = 40, VOICED = 0.6, HANG = 19, ON_TARGET = 0.3;
 const POST_FLOOR = 0.18, TOTAL_FLOOR = 0.1;  // direction filter down to -15 dB; with the noise filter, -20 dB
+// the beam also learns where bangs, taps and handling come from (held, no voice), each frequency scaled to the
+// same power so a loud one can't drown out the steady background; it then works against the background plus
+// BANG_MIX of them, which fade by BANG_FORGET every frame without one (half in about a second)
+const BANG_MIX = 1.0, BANG_FORGET = 0.995;
 const FW0 = 5, FHI = 64, FV0 = 10, FV1 = 64, LAG0 = 40, LAG1 = 200;  // 150 Hz, 2 kHz, 300–2000 Hz, 400–80 Hz pitch
 const FRW = (() => {  // the window's own correlation, divided out of the pitch correlation
   const r = new Float64Array(LAG1);
@@ -1761,9 +1765,18 @@ class Focus {
     this.tc = new Float64Array(FB * n);
     this.ts = new Float64Array(FB * n);
     this.sNow = new Float64Array(FB);
-    this.sSm = new Float64Array(FB);
-    this.sT = new Float64Array(FB).fill(1);  // how well speech lines up on the talker, per bin
-    this.sN = new Float64Array(FB).fill(1);  // how well the background does
+    // with a body between the chest and back plates the straight-line delays only hold on the plate facing
+    // the talker, so the direction filter uses that plate, each plate's filter learning on its own
+    const ys = pos.map((p) => p[1]), mid = (Math.max(...ys) + Math.min(...ys)) / 2;
+    const front = [], back = [];
+    pos.forEach((p, q) => (p[1] > mid ? front : back).push(q));
+    const plates = Math.max(...ys) - Math.min(...ys) > PLATE_GAP && front.length && back.length;
+    this.groups = (plates ? [front, back] : [pos.map((_, q) => q)]).map((idx) => ({
+      idx,
+      sSm: new Float64Array(FB),
+      sT: new Float64Array(FB).fill(1),  // how well speech lines up on the talker, per bin
+      sN: new Float64Array(FB).fill(1),  // how well the background does
+    }));
     this.gDir = new Float64Array(FB).fill(1);
     this.buf = srcs.map(() => new Float64Array(FN));
     this.pend = srcs.map(() => new Float64Array(FH));
@@ -1779,6 +1792,9 @@ class Focus {
     for (let k = 0; k < FB; k++) for (let a = 0; a < n; a++) this.RnRe[k * nn + a * n + a] = 1e-6;
     this.RsRe = Float64Array.from(this.RnRe);
     this.RsIm = new Float64Array(FB * nn);
+    this.RbRe = new Float64Array(FB * nn);
+    this.RbIm = new Float64Array(FB * nn);
+    this.nBangs = 0;
     this.wRe = null;
     this.Pn = new Float64Array(FB).fill(1e-3);
     this.gPrev = new Float64Array(FB).fill(1);
@@ -1787,6 +1803,10 @@ class Focus {
     this.nNoise = this.nSpeech = this.frames = 0;
     this.wide = [];
     this.enabled = true;
+    this.lockedSteer = false;  // while a new lock is learning, aim with the delays instead of the old weights
+    // the presenter view's "one mic": the front mic nearest the middle
+    const off = (p) => Math.abs(p[0]) + Math.abs(p[2] || 0) + (p[1] < -0.01 ? 10 : 0);
+    this.one = pos.reduce((b, p, q) => (off(p) < off(pos[b]) ? q : b), 0);
   }
   push(s, frames, cb) {  // s: interleaved int16 packet
     for (let i = 0; i < frames; i++) {
@@ -1851,22 +1871,23 @@ class Focus {
     const pitched = re[0] > 0 && best > VOICED * re[0], voiced = pitched && this.wasPitched;
     this.wasPitched = pitched;
     this.since = voiced ? 0 : this.since + 1;
-    return { speech: loud && this.since <= HANG && !this.hold, quiet: quiet && !this.hold && !voiced };
+    return { speech: loud && this.since <= HANG && !this.hold, quiet: quiet && !this.hold && !voiced, bang: this.hold > 0 && !voiced };
   }
   // per bin, how well the mics line up on the talker; returns how much this frame comes from them
   // (about 1 = all, 0 = no more than the background; null while they don't stand out from it)
   direction(speech, quiet) {
-    const n = this.n, s = this.sNow, sT = this.sT, sN = this.sN, tc = this.tc, ts = this.ts;
+    const G = this.groups[this.groups.length > 1 && Math.cos((this.target[0] * Math.PI) / 180) < 0 ? 1 : 0];
+    const n = this.n, idx = G.idx, m = idx.length, s = this.sNow, sT = G.sT, sN = G.sN, sSm = G.sSm, tc = this.tc, ts = this.ts;
     let sw = 0, swt = 0, num = 0, den = 0;
     for (let k = 0; k < FB; k++) {
       let lr = 0, li = 0, P = 0;
-      for (let q = 0; q < n; q++) {
+      for (const q of idx) {
         const xr = this.Xre[q][k], xi = this.Xim[q][k], c = tc[k * n + q], si = ts[k * n + q];
         lr += xr * c - xi * si;
         li += xr * si + xi * c;
         P += xr * xr + xi * xi;
       }
-      s[k] = (lr * lr + li * li) / (n * P + 1e-12);
+      s[k] = (lr * lr + li * li) / (m * P + 1e-12);
       if (k >= FK0 && k <= FK1) {
         const span = sT[k] - sN[k], trust = Math.min(1, Math.max(0, (span - 0.1) / 0.2));
         sw += P;
@@ -1877,9 +1898,9 @@ class Focus {
     }
     for (let k = 0; k < FB; k++) {
       const s3 = 0.5 * s[k] + 0.25 * (k > 0 ? s[k - 1] : 0) + 0.25 * (k < FB - 1 ? s[k + 1] : 0);
-      this.sSm[k] = 0.5 * this.sSm[k] + 0.5 * s3;
+      sSm[k] = 0.5 * sSm[k] + 0.5 * s3;
       const span = sT[k] - sN[k], trust = Math.min(1, Math.max(0, (span - 0.1) / 0.2));
-      const g = Math.min(1, Math.max(POST_FLOOR, (this.sSm[k] - sN[k]) / Math.max(span, 0.05)));
+      const g = Math.min(1, Math.max(POST_FLOOR, (sSm[k] - sN[k]) / Math.max(span, 0.05)));
       this.gDir[k] = 1 - trust * (1 - g);
       if (speech) sT[k] = 0.99 * sT[k] + 0.01 * s[k];
       if (quiet) sN[k] = 0.99 * sN[k] + 0.01 * s[k];
@@ -1912,8 +1933,8 @@ class Focus {
     else if (e < this.floor) this.floor = 0.9 * this.floor + 0.1 * e;
     else this.floor += 0.002;
     const loud = e > this.floor + 8;
-    const { speech, quiet } = this.detect(e, 10 * Math.log10(e150 / n + 1e-12), 10 * Math.log10(ehi / n + 1e-12),
-                                          loud, e < this.floor + 3);
+    const { speech, quiet, bang: held } = this.detect(e, 10 * Math.log10(e150 / n + 1e-12), 10 * Math.log10(ehi / n + 1e-12),
+                                                      loud, e < this.floor + 3);
     let bang = false;
     if (this.wide.length === 40) {
       const old = this.wide.slice(0, 37).sort((a, b) => a - b);
@@ -1942,12 +1963,35 @@ class Focus {
         }
         if (quiet) this.nNoise++; else this.nSpeech++;
       }
+      if (held) {
+        const Br = this.RbRe, Bi = this.RbIm;
+        for (let k = 0; k < FB; k++) {
+          const o = k * nn;
+          let p = 1e-12;
+          for (let a = 0; a < n; a++) p += this.Xre[a][k] ** 2 + this.Xim[a][k] ** 2;
+          for (let a = 0; a < n; a++) {
+            const xr = this.Xre[a][k], xi = this.Xim[a][k];
+            for (let b = 0; b < n; b++) {
+              const yr = this.Xre[b][k], yi = this.Xim[b][k], j = o + a * n + b;
+              Br[j] += 0.05 * ((xr * yr + xi * yi) / p - Br[j]);
+              Bi[j] += 0.05 * ((xi * yr - xr * yi) / p - Bi[j]);
+            }
+          }
+        }
+        this.nBangs++;
+      } else if (this.nBangs) {
+        for (let j = 0; j < this.RbRe.length; j++) { this.RbRe[j] *= BANG_FORGET; this.RbIm[j] *= BANG_FORGET; }
+      }
       if (this.frames % 32 === 0 && this.nNoise > 100 && this.nSpeech > 30) this.updateWeights();
       for (let k = 0; k < FB; k++) {
         let yr = 0, yi = 0;
         for (let q = 0; q < n; q++) {
           const xr = this.Xre[q][k], xi = this.Xim[q][k];
-          if (this.wRe) {
+          if (this.lockedSteer && this.target) {
+            const c = this.tc[k * n + q], s = this.ts[k * n + q];
+            yr += (xr * c + xi * s) / n;
+            yi += (xi * c - xr * s) / n;
+          } else if (this.wRe) {
             const wr = this.wRe[k * n + q], wi = this.wIm[k * n + q];
             yr += wr * xr + wi * xi;
             yi += wr * xi - wi * xr;
@@ -1972,6 +2016,13 @@ class Focus {
         Yim[k] = k < FLO ? 0 : yi;
       }
     }
+    let pOne = 0, pOut = 0;
+    const Xo = this.Xre[this.one], Xoi = this.Xim[this.one];
+    for (let k = FK0; k <= FK1; k++) {
+      pOne += Xo[k] * Xo[k] + Xoi[k] * Xoi[k];
+      pOut += Yre[k] * Yre[k] + Yim[k] * Yim[k];
+    }
+    const one = { samples: this.buf[this.one].subarray(FN - FH), pOne, pOut, quiet };
     Yim[0] = Yim[FN / 2] = 0;
     for (let k = FB; k < FN; k++) { Yre[k] = Yre[FN - k]; Yim[k] = Yim[FN - k]; }  // conjugated already for the inverse
     for (let k = 1; k < FB - 1; k++) Yim[k] = -Yim[k];
@@ -1980,7 +2031,7 @@ class Focus {
     const out = this.ola.slice(0, FH);
     this.ola.copyWithin(0, FH);
     this.ola.fill(0, FN - FH);
-    cb(out, speech, bang, e - this.floor);
+    cb(out, speech, bang, e - this.floor, one);
   }
   updateWeights() {
     const n = this.n, nn = n * n;
@@ -1998,6 +2049,7 @@ class Focus {
       const load = (1e-3 * tr) / n + 1e-12;
       for (let j = 0; j < nn; j++) { Nre[j] = this.RnRe[o + j]; Nim[j] = this.RnIm[o + j]; }
       for (let a = 0; a < n; a++) Nre[a * n + a] += load;
+      if (this.nBangs) for (let j = 0; j < nn; j++) { Nre[j] += BANG_MIX * tr * this.RbRe[o + j]; Nim[j] += BANG_MIX * tr * this.RbIm[o + j]; }
       // talker steering vector: principal generalized eigenvector of (Rs, Rn), by power iteration
       const [Mre, Mim] = cSolve(Nre, Nim, n, this.RsRe.subarray(o, o + nn), this.RsIm.subarray(o, o + nn), n);
       let vr = this.vRe.slice(k * n, k * n + n), vi = this.vIm.slice(k * n, k * n + n);
@@ -2044,6 +2096,18 @@ class Focus {
         this.wIm[k * n + a] = (Ri[a] * sr - Rr[a] * si) / den;
       }
     }
+    this.lockedSteer = false;
+  }
+  forgetTalker() {  // a new locked direction: drop the old talker and steer with the delays until this relearns
+    const n = this.n, nn = n * n;
+    this.RsRe.fill(0);
+    this.RsIm.fill(0);
+    for (let k = 0; k < FB; k++) for (let a = 0; a < n; a++) this.RsRe[k * nn + a * n + a] = 1e-6;
+    this.nSpeech = 0;
+    this.sT.fill(1);
+    this.sN.fill(1);
+    this.gDir.fill(1);
+    this.lockedSteer = true;
   }
 }
 
@@ -2054,6 +2118,235 @@ const JUNK = new Set(["the", "a", "huh", "uh", "um", "hm", "oh"]);
 const cap = { on: S.cc, lines: [], interim: null, gain: 20, lastBang: 0, voiceUntil: 0 };
 const asr = { rec: null, loading: false, status: "", buf: new Float32Array(1024), n: 0, fed: 0 };
 let focus = null;
+// Presenter view: the same recognizer (and the same better-words model) on one plain mic, next to the vest's
+// captions, and how much quieter the vest leaves the background once both voices are equally loud.
+// meter: voice-band power of the one mic and of voice focus, averaged over speech and over quiet frames
+const stage = { rec: null, lines: [], interim: null, gain: 20, buf: new Float32Array(1024), n: 0, fed: 0,
+                ring: new Float32Array(FS * 40), meter: null, shown: null, shownAt: 0, hit: {} };
+
+function stageStart() {
+  if (stage.rec || !asr.model || !S.stage) return;
+  const rec = new asr.model.KaldiRecognizer(FS);
+  rec.on("partialresult", (m) => {
+    const t = (m.result.partial || "").trim();
+    stage.interim = t && !JUNK.has(t) ? { text: tidy(t) } : null;
+  });
+  rec.on("result", (m) => {
+    const t = (m.result.text || "").trim(), words = m.result.result || [];
+    stage.interim = null;
+    if (!words.length || !t || JUNK.has(t)) return;
+    const t0 = words[0].start, t1 = words[words.length - 1].end;
+    hqSubmit(addLine(tidy(t), null, "speech", t0, t1, stage.lines), t0, t1, stage.ring, stage.fed);
+  });
+  rec.setWords(true);
+  stage.rec = rec;
+}
+
+function stageStop() {
+  try { stage.rec?.remove(); } catch (e) { /* the model's worker is already gone */ }
+  Object.assign(stage, { rec: null, interim: null, n: 0 });
+}
+
+function stageClear() {
+  cap.lines = [];
+  cap.interim = null;
+  stage.lines = [];
+  stage.interim = null;
+  stage.meter = stage.shown = null;
+}
+
+function stageFrame(one, speech) {
+  const m = stage.meter || (stage.meter = { oneS: 0, outS: 0, oneN: 0, outN: 0, nS: 0, nN: 0 });
+  const add = (k, kn, v) => { m[k] = m[kn] < 400 ? m[k] + (v - m[k]) / (m[kn] + 1) : 0.9975 * m[k] + 0.0025 * v; };
+  if (speech) { add("oneS", "nS", one.pOne); add("outS", "nS", one.pOut); m.nS++; }
+  else if (one.quiet) { add("oneN", "nN", one.pOne); add("outN", "nN", one.pOut); m.nN++; }
+  const now = performance.now();
+  if (m.nS > 120 && m.nN > 120 && now - stage.shownAt > 500) {
+    const vOne = Math.max(m.oneS - m.oneN, 1e-3 * m.oneN), vOut = Math.max(m.outS - m.outN, 1e-3 * m.outN);
+    stage.shown = 10 * Math.log10((m.oneN / vOne) / (m.outN / vOut + 1e-30));
+    stage.shownAt = now;
+  }
+  if (!stage.rec) return;
+  const s = one.samples;
+  if (speech) {
+    let p = 0;
+    for (let i = 0; i < FH; i++) p += s[i] * s[i];
+    stage.gain = 0.98 * stage.gain + 0.02 * Math.min(400, Math.max(1, 3000 / (Math.sqrt(p / FH) + 1e-9)));
+  }
+  const g = stage.gain / 32768, ring = stage.ring, base = stage.fed;
+  stage.fed += FH;
+  for (let i = 0; i < FH; i++) {
+    const x = Math.max(-1, Math.min(1, s[i] * g));
+    ring[(base + i) % ring.length] = x;
+    stage.buf[stage.n++] = x;
+    if (stage.n === stage.buf.length) {
+      stage.rec.acceptWaveformFloat(stage.buf, FS);
+      stage.n = 0;
+    }
+  }
+}
+
+// Presenter replay: hold Space to record the one plain mic and the vest side by side, Shift plays the clip,
+// L flips between them mid-play. What you hear is levelled like Vest Review (listenLevel): the voice's louder
+// moments at the same comfortable level in both, so flipping only changes the background, plus Boost (up /
+// down arrows) and Remove taps (T). Nothing plays live, so the speakers can't feed back into the vest.
+const REPLAY_MAX = 60 * FS, BOOST_MIN = -12, BOOST_MAX = 24;
+const replay = { src: "one", boost: 0, taps: false, hp: 0, hpPrev: 0, rec: false, recOne: [], recVest: [], recSpeech: [],
+                 recN: 0, clip: null, heard: null, ctx: null, play: null };
+
+const LOUD_VOICE_DB = -20;  // Auto volume puts the voice's louder moments (90th percentile of 50 ms levels) here
+
+function percentile(a, q) {  // numpy's default (linear between the two nearest)
+  const s = Float64Array.from(a).sort(), i = (q / 100) * (s.length - 1), lo = Math.floor(i);
+  return lo + 1 < s.length ? s[lo] + (s[lo + 1] - s[lo]) * (i - lo) : s[lo];
+}
+
+// tools/vest6_review.py listen_level: x (int16 scale) raised so the voice is easy to hear, nothing past -1 dBFS,
+// and with taps on, anything sudden and louder than the voice turned down to the voice's own peaks.
+// speech: one flag per 8 ms frame. Returns -1..1.
+function listenLevel(x, speech, boostDb, taps) {
+  const n = x.length, blk = 16, nb = Math.floor(n / blk), nf = Math.floor(n / 800), y = new Float32Array(n);
+  if (nb < 10 || !nf) return y;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += x[i];
+  mean /= n;
+  const pk = new Float64Array(nb), lv = new Float64Array(nf);
+  for (let b = 0; b < nb; b++) {
+    let m = 0;
+    for (let i = b * blk; i < (b + 1) * blk; i++) m = Math.max(m, Math.abs(x[i] - mean));
+    pk[b] = m;
+  }
+  for (let f = 0; f < nf; f++) {
+    let e = 0;
+    for (let i = f * 800; i < (f + 1) * 800; i++) e += (x[i] - mean) ** 2;
+    lv[f] = 10 * Math.log10(e / 800 + 1e-9) - 20 * Math.log10(32768);
+  }
+  let inSpeech = Uint8Array.from({ length: nb }, (_, b) => speech[Math.floor((b * blk) / FH)] || 0);
+  let inSpeechF = Uint8Array.from({ length: nf }, (_, f) => (inSpeech.subarray(f * 50, f * 50 + 50).some((v) => v) ? 1 : 0));
+  if (inSpeechF.reduce((a, v) => a + v, 0) < 20) {  // no speech found: the clip's louder half stands in for it
+    const med = percentile(lv, 50);
+    inSpeechF = lv.map((v) => (v > med ? 1 : 0));
+    inSpeech = Uint8Array.from({ length: nb }, (_, b) => inSpeechF[Math.min(nf - 1, Math.floor(b / 50))]);
+  }
+  const gainDb = LOUD_VOICE_DB - percentile(lv.filter((_, f) => inSpeechF[f]), 90) + boostDb, g = 10 ** (gainDb / 20);
+  const need = new Float64Array(nb);
+  for (let b = 0; b < nb; b++) need[b] = Math.min(1, (32767 * 10 ** (-1 / 20)) / g / Math.max(pk[b], 1e-9));
+  if (taps) {
+    // past the voice's own peaks, a sound goes down twice as far as it's over: a tap 15 dB over ends
+    // 15 dB under, a loud word 1 dB over ends 1 dB under
+    const voicePeak = percentile(pk.filter((_, b) => inSpeech[b]), 99) * 10 ** (3 / 20);
+    for (let b = 0; b < nb; b++) need[b] = Math.min(need[b], Math.max(10 ** (-40 / 20), Math.min(1, voicePeak / Math.max(pk[b], 1e-9)) ** 2));
+  }
+  for (const k of [1, 2, 3]) {  // look-ahead: the gain is already down when a tap's first edge arrives
+    const c = need.slice();
+    for (let b = 0; b + k < nb; b++) need[b] = Math.min(c[b], c[b + k]);
+  }
+  const gain = new Float64Array(nb), rel = Math.exp(-1 / 60);  // comes back up over ~60 ms
+  let cur = 1;
+  for (let b = 0; b < nb; b++) gain[b] = cur = Math.min(need[b], 1 - (1 - cur) * rel);
+  for (let i = 0; i < n; i++) {
+    const t = (i - blk / 2) / blk, b = Math.max(0, Math.min(nb - 1, Math.floor(t))), b1 = Math.min(nb - 1, b + 1);
+    const gs = t <= 0 ? gain[0] : t >= nb - 1 ? gain[nb - 1] : gain[b] + (gain[b1] - gain[b]) * (t - b);
+    y[i] = Math.max(-32767, Math.min(32767, (x[i] - mean) * g * gs)) / 32768;
+  }
+  return y;
+}
+
+function replayHeard() {  // the clip as it sounds at the current settings
+  const key = `${replay.boost}|${replay.taps}`;
+  if (replay.heard?.key !== key) {
+    const c = replay.clip;
+    replay.heard = { key, one: listenLevel(c.one, c.speech, replay.boost, replay.taps),
+                     vest: listenLevel(c.vest, c.speech, replay.boost, replay.taps) };
+  }
+  return replay.heard;
+}
+
+function replaySource(src) {
+  replay.src = src;
+  const p = replay.play;
+  if (!p) return;
+  const t = p.ctx.currentTime;
+  p.gOne.gain.setTargetAtTime(src === "one" ? 1 : 0, t, 0.005);
+  p.gVest.gain.setTargetAtTime(src === "vest" ? 1 : 0, t, 0.005);
+}
+
+function replayRecord(on) {
+  if (on === replay.rec) return;
+  if (on) {
+    replayStop();
+    Object.assign(replay, { rec: true, recOne: [], recVest: [], recSpeech: [], recN: 0 });
+    return;
+  }
+  replay.rec = false;
+  if (replay.recN < FS / 4) return;  // a tap, not a take: keep the clip we had
+  const join = (parts) => {
+    const x = new Float32Array(replay.recN);
+    parts.reduce((o, c) => (x.set(c, o), o + c.length), 0);
+    return x;
+  };
+  replay.clip = { one: join(replay.recOne), vest: join(replay.recVest), speech: Uint8Array.from(replay.recSpeech) };
+  replay.heard = null;
+  replay.recOne = replay.recVest = replay.recSpeech = [];
+}
+
+function replayPos() {
+  const p = replay.play;
+  return p ? Math.max(0, p.ctx.currentTime - p.t0) : 0;
+}
+
+function replayStop() {
+  const p = replay.play;
+  if (!p) return;
+  replay.play = null;
+  p.nodes.forEach((n) => { n.onended = null; try { n.stop(); } catch (e) { /* not started */ } });
+}
+
+function replayPlay(from = 0) {
+  if (!replay.clip || replay.rec) return;
+  replayStop();
+  const ctx = replay.ctx || (replay.ctx = new AudioContext());
+  ctx.resume();
+  const heard = replayHeard(), len = heard.one.length / FS;
+  if (from >= len) return;
+  const t = ctx.currentTime + 0.05, p = { ctx, t0: t - from, nodes: [] };
+  for (const src of ["one", "vest"]) {
+    const buf = ctx.createBuffer(1, heard[src].length, FS);
+    buf.copyToChannel(heard[src], 0);
+    const node = ctx.createBufferSource(), g = ctx.createGain();
+    node.buffer = buf;
+    g.gain.value = src === replay.src ? 1 : 0;
+    node.connect(g).connect(ctx.destination);
+    node.start(t, from);
+    p.nodes.push(node);
+    p[src === "one" ? "gOne" : "gVest"] = g;
+  }
+  p.nodes[0].onended = () => { if (replay.play === p) replay.play = null; };
+  replay.play = p;
+}
+
+// Boost or Remove taps changed: mid-play, carry on from the same moment at the new settings
+function replayRelevel(boost, taps) {
+  const at = replay.play ? replayPos() : null;
+  replay.boost = Math.max(BOOST_MIN, Math.min(BOOST_MAX, boost));
+  replay.taps = taps;
+  if (at !== null) replayPlay(at + 0.05);  // replayPlay starts 50 ms ahead
+}
+
+function replayFrame(out, one, speech) {
+  if (!replay.rec) return;
+  const s = one.samples, y = new Float32Array(FH);
+  for (let i = 0; i < FH; i++) {
+    replay.hp = 0.97 * (replay.hp + s[i] - replay.hpPrev);  // ~80 Hz high-pass: the raw mic's offset and rumble
+    replay.hpPrev = s[i];
+    y[i] = replay.hp;
+  }
+  replay.recOne.push(y);
+  replay.recVest.push(Float32Array.from(out));
+  replay.recSpeech.push(speech ? 1 : 0);
+  replay.recN += FH;
+  if (replay.recN >= REPLAY_MAX) replayRecord(false);
+}
 
 // Talker direction: voice-band SRP on the frames voice focus marks as speech, each frame's curve
 // normalised so one loud frame can't outvote the rest, stamped with the recognizer's audio clock.
@@ -2063,6 +2356,53 @@ let focus = null;
 const utt = { log: [], tick: 0, skip: 0, lastEnd: 0 };
 // the voice focus's aim: the direction curves of the last second or so of speech, added up
 const aim = { acc: new Float64Array(360), el: 0, w: 0 };
+let aimLock = null;  // {az, el}: the beam stays there. null follows whoever is talking
+const viewHit = { pic: null, dials: [] };
+
+function unorient(shown) {
+  const a = S.swapfb ? wrap(180 - shown) : shown;
+  return wrap(S.swap ? -a : a);
+}
+function aimText() {
+  return aimLock ? sideText(orient(aimLock.az)) : "";
+}
+function lockAim(az, el) {
+  const next = { az: wrap(az), el: Math.max(-40, Math.min(60, el || 0)) };
+  const moved = !aimLock || Math.abs(wrap(next.az - aimLock.az)) > 4 || Math.abs(next.el - aimLock.el) > 4;
+  aimLock = next;
+  if (moved) focus?.forgetTalker();
+  focus?.setTarget(aimLock.az, aimLock.el);
+  uiSync();
+}
+function toggleAimLock() {
+  if (aimLock) {
+    aimLock = null;
+    if (focus) focus.lockedSteer = false;
+    hint("Voice focus follows whoever is talking.");
+    uiSync();
+    return;
+  }
+  let kb = 0;
+  for (let k = 1; k < 360; k++) if (aim.acc[k] > aim.acc[kb]) kb = k;
+  const az = focus?.target ? focus.target[0] : kb - 180;
+  const el = focus?.target ? focus.target[1] : (aim.w > 0 ? aim.el / aim.w : 0);
+  lockAim(az, el);
+  hint(`Voice focus locked ${aimText()}. Tap the picture or the compass to move it.`);
+}
+function drawAimLock(cx, cy, rad) {
+  const a = orient(aimLock.az);
+  const [x0, y0] = polar(cx, cy, rad * 0.22, a), [x1, y1] = polar(cx, cy, rad * 0.96, a);
+  ctx.strokeStyle = "#d2a8ff";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x1, y1, 5, 0, 2 * Math.PI);
+  ctx.fillStyle = "#d2a8ff";
+  ctx.fill();
+}
 
 function trackSpeechDir(weight) {
   const act = model.active();
@@ -2072,16 +2412,18 @@ function trackSpeechDir(weight) {
   const med = (sorted[179] + sorted[180]) / 2, span = Math.max(sorted[359] - med, 1e-9);
   const curve = new Float32Array(360);
   for (let k = 0; k < 360; k++) curve[k] = (weight * (c[k] - med)) / span;
-  let kb = 0;
-  for (let k = 0; k < 360; k++) {
-    aim.acc[k] = 0.9 * aim.acc[k] + curve[k];
-    if (aim.acc[k] > aim.acc[kb]) kb = k;
-  }
-  if (c.el != null) {
-    aim.el = 0.9 * aim.el + weight * c.el;
-    aim.w = 0.9 * aim.w + weight;
-  }
-  focus?.setTarget(kb - 180, aim.w > 0 ? aim.el / aim.w : 0);
+  if (!aimLock) {
+    let kb = 0;
+    for (let k = 0; k < 360; k++) {
+      aim.acc[k] = 0.9 * aim.acc[k] + curve[k];
+      if (aim.acc[k] > aim.acc[kb]) kb = k;
+    }
+    if (c.el != null) {
+      aim.el = 0.9 * aim.el + weight * c.el;
+      aim.w = 0.9 * aim.w + weight;
+    }
+    focus?.setTarget(kb - 180, aim.w > 0 ? aim.el / aim.w : 0);
+  } else focus?.setTarget(aimLock.az, aimLock.el);
   const t = asr.fed / FS;
   utt.log.push({ t, curve, el: c.el ?? null, back: st.hasBack });
   while (utt.log.length && t - utt.log[0].t > 60) utt.log.shift();
@@ -2130,8 +2472,8 @@ const tidy = (t) => {
 
 // t0/t1: the words' times on the recognizer's audio clock, so a short pause mid-sentence joins the line
 // even when results arrive late and bunched up. Returns the piece, so Moonshine can swap its words later.
-function addLine(text, angle, kind = "speech", t0 = null, t1 = null) {
-  const now = performance.now() / 1000, last = cap.lines[cap.lines.length - 1];
+function addLine(text, angle, kind = "speech", t0 = null, t1 = null, lines = cap.lines) {
+  const now = performance.now() / 1000, last = lines[lines.length - 1];
   const sameTalker = last && (angle === null || last.angle === null || Math.abs(wrap(angle - last.angle)) < 25);
   let line;
   if (kind === "speech" && last && last.kind === "speech" && sameTalker && t0 !== null && last.t1 !== null
@@ -2141,8 +2483,8 @@ function addLine(text, angle, kind = "speech", t0 = null, t1 = null) {
     line.t1 = t1;
   } else {
     line = { wall: now, text: "", parts: [], angle, kind, t1 };
-    cap.lines.push(line);
-    if (cap.lines.length > 200) cap.lines.shift();
+    lines.push(line);
+    if (lines.length > 200) lines.shift();
   }
   const part = { text, line };
   line.parts.push(part);
@@ -2244,16 +2586,16 @@ function plausible(text, sec) {
   return true;
 }
 
-function hqSubmit(part, t0, t1) {
+function hqSubmit(part, t0, t1, ring = hq.ring, fed = asr.fed) {
   if (!hq.worker) return;
-  const ring = hq.ring, L = ring.length;
-  const s0 = Math.max(Math.round((t0 - 0.3) * FS), asr.fed - L + 1, 0), s1 = Math.min(Math.round((t1 + 0.3) * FS), asr.fed);
+  const L = ring.length;
+  const s0 = Math.max(Math.round((t0 - 0.3) * FS), fed - L + 1, 0), s1 = Math.min(Math.round((t1 + 0.3) * FS), fed);
   if (s1 - s0 < FS * 0.25) return;
   const pad = Math.max(0, Math.ceil((FS - (s1 - s0)) / 2));  // at least 1 s, padded with silence
   const audio = new Float32Array(s1 - s0 + 2 * pad);
   for (let i = s0; i < s1; i++) audio[pad + i - s0] = ring[i % L];
   hq.queue.push({ id: ++hq.id, part, audio });
-  while (hq.queue.length > 4) hq.queue.shift();  // falling behind: the oldest keeps Vosk's words
+  while (hq.queue.length > (stage.rec ? 8 : 4)) hq.queue.shift();  // falling behind: the oldest keeps Vosk's words
   hqNext();
 }
 
@@ -2301,6 +2643,7 @@ async function asrLoad() {
     rec.setWords(true);
     asr.rec = rec;
     asr.status = "";
+    stageStart();
     hqLoad();
   } catch (e) {
     asr.status = `speech model didn't load: ${e.message || e}`;
@@ -2308,7 +2651,11 @@ async function asrLoad() {
   asr.loading = false;
 }
 
-function onFocusFrame(out, speech, bang, overFloor) {
+function onFocusFrame(out, speech, bang, overFloor, one) {
+  if (S.stage) {
+    stageFrame(one, speech);
+    replayFrame(out, one, speech);
+  }
   if (speech) {
     let s = 0;
     for (let i = 0; i < FH; i++) s += out[i] * out[i];
@@ -2347,6 +2694,10 @@ function runFocus(s, frames) {
   if (!focus || focus.srcs.join() !== srcs.join() || focus.geom !== model.geom) {
     focus = new Focus(srcs, act.map(([c]) => [model.geom[c][1] / 1000, model.geom[c][2] / 1000, (model.geom[c][3] || 0) / 1000]));
     focus.geom = model.geom;
+    if (aimLock) {
+      focus.setTarget(aimLock.az, aimLock.el);
+      focus.lockedSteer = true;
+    }
   }
   focus.enabled = S.focus;
   focus.push(s, frames, onFocusFrame);
@@ -2469,6 +2820,20 @@ function drawCamera(r) {
   cal.pic = pic;
   const half = S.hfov / 2, f = pic.w / 2 / Math.tan((half * Math.PI) / 180);
   const xOf = (rel) => pic.cx - f * Math.tan((Math.max(-89, Math.min(89, rel)) * Math.PI) / 180);
+  viewHit.pic = pic;
+  if (aimLock) {
+    const rel = wrap(orient(aimLock.az) - S.offset);
+    if (Math.abs(rel) <= half + 2) {
+      const x = xOf(rel);
+      ctx.strokeStyle = "#d2a8ff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(x, pic.y);
+      ctx.lineTo(x, pic.b);
+      ctx.stroke();
+      text("locked", x, pic.y + 16, 12, "#d2a8ff", "center");
+    }
+  }
   // ruler
   ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
   ctx.fillRect(pic.x, pic.b - 24, pic.w, 24);
@@ -2635,7 +3000,7 @@ function where(angle) {
 }
 
 function drawCaptions(pic, f, lift, opts = {}) {
-  if (!cap.on) return;
+  if (!cap.on || S.stage) return;
   const now = performance.now() / 1000, keep = opts.rows || 3;
   const rows = cap.lines.filter((l) => now - l.wall < CAPTION_HOLD_S).slice(-Math.min(2, keep)).map((l) => ({ ...l, interim: false }));
   if (cap.interim) rows.push({ ...cap.interim, interim: true });
@@ -2704,6 +3069,8 @@ function drawGauge(r) {
   panel(r, "Direction (top view, full circle)");
   const top = r.y + 74, cx = r.cx, cy = top + (r.b - top) / 2;
   const rad = Math.max(30, Math.min(r.w * 0.36, (r.b - top) / 2 - 22));
+  viewHit.dials.push({ cx, cy, rad });
+  if (aimLock) drawAimLock(cx, cy, rad);
   ctx.beginPath();
   ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
   ctx.fillStyle = "#0f141a";
@@ -2894,7 +3261,9 @@ const turnText = (a) => (Math.abs(a) < 10 ? "Straight ahead" : Math.abs(a) > 165
 const whereText = (a) => (Math.abs(a) < 15 ? "ahead" : Math.abs(a) > 165 ? "behind you"
   : `${Math.abs(a).toFixed(0)}° ${a > 0 ? "left" : "right"}`);
 const trendText = (t) => (t > 2.5 ? ["Getting closer ▲", FOX] : t < -2.5 ? ["Getting farther ▼", LOUD] : ["Same distance", DIM]);
-const beaconUrl = (role) => `${location.host}${location.pathname.replace(/[^/]*$/, "")}beacon.html?role=${role}`;
+// the laptop app's own address only works on the laptop, so phones get the published copy
+const beaconUrl = (role) => `${APP_WS ? "moonx02.github.io/wearable-mic-array/app/"
+  : location.host + location.pathname.replace(/[^/]*$/, "")}beacon.html?role=${role}`;
 
 function drawFinder(r) {
   panel(r, `Find · ${FIND_MODES[S.findMode].name}`);
@@ -3108,6 +3477,8 @@ function drawRadar(r) {
   const listW = r.w >= 560 ? Math.min(240, r.w * 0.3) : 0;  // room on the left for the recent sounds
   const cy = r.y + head + (r.h - head - foot) / 2, cx = r.x + listW + (r.w - listW) / 2;
   const rad = Math.max(40, Math.min((r.w - listW) * 0.36, (r.h - head - foot) / 2 - 30));
+  viewHit.dials.push({ cx, cy, rad });
+  if (aimLock) drawAimLock(cx, cy, rad);
   const big = Math.max(18, Math.min(34, r.w / 24));
 
   // what and where, in words
@@ -3259,10 +3630,138 @@ function render(now) {
   busy.ms += performance.now() - t0;
 }
 
+// one presenter column: big captions, newest at the bottom; the vest's carry the talker's direction
+function drawStageColumn(r, title, color, lines, interim, vest) {
+  const heard = replay.src === (vest ? "vest" : "one") && !!(replay.clip || replay.rec);
+  stage.hit[vest ? "vest" : "one"] = r;
+  rrect(r.x, r.y, r.w, r.h, 10);
+  ctx.fillStyle = PANEL;
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = heard ? 6 : 2;
+  ctx.stroke();
+  const tp = Math.round(Math.max(16, Math.min(26, r.w / 18)));
+  text(title, r.x + 16, r.y + tp, tp, color, "left", true);
+  const loading = !cap.on ? "captions off" : asr.status ? "loading speech model…" : !vest && !stage.rec ? "starting…" : "";
+  const model = hq.ready ? hq.name.replace(" (GPU)", "") : "instant words";
+  if (heard && replay.play) text("♪ playing", r.r - 16, r.y + tp, Math.round(tp * 0.75), color, "right", true);
+  else text(loading || model, r.r - 16, r.y + tp, Math.round(tp * 0.6), DIM, "right");
+  const inner = R(r.x + 16, r.y + tp * 2 + 4, r.w - 32, r.h - tp * 2 - 16);
+  const px = Math.round(Math.max(16, Math.min(34, r.w / 20))), lh = Math.round(px * 1.3);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(inner.x, inner.y, inner.w, inner.h);
+  ctx.clip();
+  let y = inner.b;
+  if (interim) {
+    ctx.font = `italic ${font(px)}`;
+    const ls = wrapLines(interim.text, inner.w);
+    y -= ls.length * lh;
+    ls.forEach((l, j) => {
+      ctx.font = `italic ${font(px)}`;
+      ctx.fillStyle = DIM;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(l, inner.x, y + j * lh + lh / 2);
+    });
+    y -= lh * 0.4;
+  }
+  for (let i = lines.length - 1; i >= 0 && y > inner.y; i--) {
+    const ln = lines[i], sound = ln.kind === "sound";
+    ctx.font = font(px, sound);
+    const ls = wrapLines(ln.text, inner.w);
+    const tag = vest && ln.angle !== null ? Math.round(px * 0.75) : 0;
+    y -= ls.length * lh;
+    ls.forEach((l, j) => {
+      if (y + j * lh >= inner.y) text(l, inner.x, y + j * lh + lh / 2, px, sound ? LOUD : INK, "left", sound);
+    });
+    if (y - tag < inner.y) break;
+    if (tag) {
+      const rel = orient(ln.angle);
+      y -= tag;
+      text(`${Math.abs(rel) > 100 ? "▼ behind you, " : rel > 0 ? "◀ " : ""}${sideText(rel)}${rel < 0 && Math.abs(rel) <= 100 ? " ▶" : ""}`,
+           inner.x, y + px * 0.35, Math.round(px * 0.55), color, "left", true);
+    }
+    y -= lh * 0.45;
+  }
+  if (!lines.length && !interim) {
+    text(cap.on ? (vest ? "the vest: 8 mics, focused on the talker" : "one plain mic, as a hearing aid or phone would hear")
+      : "turn captions on (CC)", inner.cx, inner.cy, Math.round(px * 0.7), DIM, "center");
+  }
+  ctx.restore();
+}
+
+function drawStageMeter(r) {
+  panel(r, "Background noise");
+  const v = stage.shown, big = Math.round(Math.max(28, Math.min(r.h * 0.34, r.w / 3.2)));
+  const name = replay.src === "one" ? "one mic" : "the vest", len = replay.clip ? replay.clip.one.length / FS : 0;
+  const [t, col] = replay.rec ? [`● recording ${(replay.recN / FS).toFixed(1)} s · let go of Space to stop`, LOUD]
+    : replay.play ? [`▶ ${Math.min(len, replayPos()).toFixed(1)} / ${len.toFixed(1)} s: ${name} · L switches · Shift stops`, INK]
+    : replay.clip ? [`${len.toFixed(1)} s clip · Shift plays ${name} · L switches · hold Space for a new one`, INK]
+    : ["hold Space to record a clip, Shift plays it, L switches mic", DIM];
+  let px = Math.max(10, Math.round(big * 0.16));
+  for (ctx.font = font(px, true); px > 8 && ctx.measureText(t).width > r.w - 16; ) ctx.font = font(--px, true);
+  text(t, r.cx, r.b - 14, px, col, "center", true);
+  if (replay.clip || replay.rec) {
+    const vol = `auto volume, boost ${replay.boost >= 0 ? "+" : "−"}${Math.abs(replay.boost)} dB (↑ ↓) · remove taps ${replay.taps ? "on" : "off"} (T)`;
+    text(vol, r.cx, r.b - 14 - Math.round(px * 1.6), px, replay.boost || replay.taps ? INK : DIM, "center");
+  }
+  if (replay.rec) {
+    rrect(r.x + 2, r.y + 2, r.w - 4, r.h - 4, 10);
+    ctx.strokeStyle = LOUD;
+    ctx.lineWidth = 4;
+    ctx.stroke();
+  }
+  if (!S.focus) {
+    text("voice focus is off", r.cx, r.cy, Math.round(big * 0.35), DIM, "center", true);
+    return;
+  }
+  if (v === null) {
+    text("measuring…", r.cx, r.cy - big * 0.1, Math.round(big * 0.4), DIM, "center", true);
+    text("needs some talking and some pauses", r.cx, r.cy + big * 0.5, Math.max(11, Math.round(big * 0.2)), DIM, "center");
+    return;
+  }
+  const good = v >= 6;
+  text(`${v >= 0 ? "−" : "+"}${Math.abs(v).toFixed(0)} dB`, r.cx, r.cy - big * 0.15, big, good ? FOX : INK, "center", true);
+  const sm = Math.max(11, Math.round(big * 0.2));
+  text("quieter with the vest", r.cx, r.cy + big * 0.55, sm, INK, "center");
+  text(`than one mic, voice equally loud${v >= 10 ? ` · ${Math.round(10 ** (v / 10))}× less noise` : ""}`,
+       r.cx, r.cy + big * 0.55 + sm * 1.4, Math.max(10, Math.round(sm * 0.8)), DIM, "center");
+}
+
+function drawStage(g) {
+  const wide = W >= H * 1.15, topH = Math.round((H - 3 * g) * (wide ? 0.5 : 0.42));
+  if (wide) {
+    const lw = Math.round(W * 0.62);
+    (S.camOff ? drawRadar : drawCamera)(R(g, g, lw - g, topH));
+    drawGauge(R(lw + g, g, W - lw - 2 * g, topH));
+  } else {
+    (S.camOff ? drawRadar : drawCamera)(R(g, g, W - 2 * g, topH));
+  }
+  const y = topH + 2 * g, h = H - y - g;
+  if (wide) {
+    const mw = Math.round(W * 0.2), cw = Math.round((W - mw - 4 * g) / 2);
+    drawStageColumn(R(g, y, cw, h), "One mic", "#f0883e", stage.lines, stage.interim, false);
+    drawStageMeter(R(2 * g + cw, y, mw, h));
+    drawStageColumn(R(3 * g + cw + mw, y, W - 4 * g - cw - mw, h), "Vest · voice focus", "#58a6ff", cap.lines, cap.interim, true);
+  } else {
+    const mh = Math.round(h * 0.22), cw = Math.round((W - 3 * g) / 2), ch = h - mh - g;
+    drawStageMeter(R(g, y, W - 2 * g, mh));
+    drawStageColumn(R(g, y + mh + g, cw, ch), "One mic", "#f0883e", stage.lines, stage.interim, false);
+    drawStageColumn(R(2 * g + cw, y + mh + g, W - 3 * g - cw, ch), "Vest · voice focus", "#58a6ff", cap.lines, cap.interim, true);
+  }
+}
+
 function draw() {
+  viewHit.pic = null;
+  viewHit.dials.length = 0;
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
   const g = 10;
+  if (S.stage) {
+    drawStage(g);
+    return;
+  }
   if (S.camOff) {  // the radar takes the camera's place
     if (W >= H * 1.15) {
       const lw = W * 0.64, x1 = lw + g / 2, cw = W - x1 - g, th = (H - 3 * g) * 0.62;
@@ -3344,7 +3843,19 @@ setInterval(() => {
 // The tablet's USB link can't carry all eight mics plus the camera, so ask the board for just the mics
 // the layout uses (and any data-line partner standing in for a dead one). Repeated, because the board
 // goes back to all eight when the requests stop.
+function sendBoardTime() {
+  if (!conn || conn instanceof DemoConn || connState !== "streaming") return;
+  const d = new Date();
+  conn.send(new Uint8Array([116, d.getFullYear() - 2000, d.getMonth() + 1, d.getDate(),
+    d.getHours(), d.getMinutes(), d.getSeconds()]));  // 't' + local date, so the card files aren't 1 Jan 1960
+}
+
+let boardTimeSent = 0;
 setInterval(() => {
+  if (conn && !(conn instanceof DemoConn) && connState === "streaming" && performance.now() - boardTimeSent > 30000) {
+    boardTimeSent = performance.now();
+    sendBoardTime();
+  }
   if (conn && !(conn instanceof DemoConn) && connState === "streaming" && !boardFw) conn.send(new Uint8Array([63]));  // '?': which firmware
   // Chrome's Web Serial on macOS loses 0xFF bytes (camera frames break, mic packets go missing), so ask the
   // board for a stream without any. Boards that don't know 'x' ignore it.
@@ -3399,8 +3910,11 @@ function uiSync() {
   $("findmode").classList.toggle("hidden", !S.find);
   $("findmode").value = S.findMode;
   $("focus").classList.toggle("on", S.focus);
+  $("aimlock").classList.toggle("on", !!aimLock);
+  $("aimlock").textContent = aimLock ? `Locked · ${aimText()}` : "Lock aim";
   $("cam").classList.toggle("on", !S.camOff);
   $("cam").textContent = S.camOff ? "Camera off" : "Camera";
+  $("stage").classList.toggle("on", !!S.stage);
   $("swaplr").classList.toggle("on", S.swap);
   $("swapfb").classList.toggle("on", S.swapfb);
   $("mirror").classList.toggle("on", S.mirror);
@@ -3702,6 +4216,26 @@ cv.addEventListener("pointerdown", (e) => {
   calShow();
   hint("Spot moved to where you tapped. Capture when the chirps are coming from there.");
 });
+cv.addEventListener("pointerdown", (e) => {
+  if (cal.on) return;
+  const b = cv.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top;
+  const pic = viewHit.pic;
+  if (pic && x >= pic.x && x <= pic.r && y >= pic.y && y <= pic.b) {
+    const f = pic.w / 2 / Math.tan((S.hfov / 2 * Math.PI) / 180);
+    const rel = Math.atan((pic.cx - x) / f) * 180 / Math.PI;
+    const el = Math.atan((pic.cy - y) / f) * 180 / Math.PI + S.tilt;
+    lockAim(unorient(wrap(rel + S.offset)), el);
+    hint(`Voice focus locked ${aimText()} from the picture.`);
+    return;
+  }
+  for (const d of viewHit.dials) {
+    const dx = d.cx - x, dy = d.cy - y;
+    if (dx * dx + dy * dy > d.rad * d.rad) continue;
+    lockAim(unorient(wrap(Math.atan2(dx, dy) * 180 / Math.PI)), aimLock ? aimLock.el : 0);
+    hint(`Voice focus locked ${aimText()} from the compass.`);
+    return;
+  }
+});
 const refit = () => { if (S.cal.length) calShow(calFit()); };
 $("swaplr").onclick = () => { S.swap = !S.swap; refit(); save(); uiSync(); };
 $("swapfb").onclick = () => { S.swapfb = !S.swapfb; refit(); save(); uiSync(); };
@@ -3763,6 +4297,7 @@ $("logclear").onclick = (e) => {
 };
 $("rec").onclick = () => {
   const on = !$("rec").classList.contains("on");
+  sendBoardTime();
   // 'v' = mics + the camera's picture, 'a' = mics only (the camera is off, so there's no picture to keep)
   conn?.send(new TextEncoder().encode(on ? (S.camOff ? "a" : "v") : "s"));
   hint(on ? (S.camOff ? "Recording the mics to the SD card (camera off: no video)." : "Recording mics + video to the SD card.")
@@ -3773,6 +4308,7 @@ $("rec").onclick = () => {
 // Captions off for Find mode: drop both speech models so their memory and CPU go back to the tablet
 // (they come back from this device's cache when CC is turned on again)
 function asrUnload() {
+  stageStop();
   try { asr.model?.terminate?.(); } catch (e) { /* already gone */ }
   asr.model = null;
   asr.rec = null;
@@ -3829,6 +4365,53 @@ $("cc").onclick = () => {
 $("find").onclick = () => { setFind(!S.find); save(); uiSync(); };
 $("findmode").onchange = (e) => { S.findMode = e.target.value; setFind(true); save(); uiSync(); };
 $("focus").onclick = () => { S.focus = !S.focus; save(); uiSync(); };
+$("aimlock").onclick = () => toggleAimLock();
+
+function setStage(on) {
+  S.stage = on;
+  save();
+  stageClear();
+  if (on) {
+    if (S.find) setFind(false);
+    if (!cap.on) setCC(true);
+    stageStart();
+    document.activeElement?.blur?.();  // Space records; it mustn't also press the focused button
+    hint("Presenter view: hold Space to record a clip, Shift plays it, L switches between one mic and the vest, ↑ ↓ boost, T removes taps, C clears, Esc leaves.");
+  } else {
+    stageStop();
+    replayRecord(false);
+    replayStop();
+  }
+  uiSync();
+}
+$("stage").onclick = () => setStage(!S.stage);
+window.addEventListener("keydown", (e) => {
+  if (!S.stage || e.target.closest?.("input, select")) return;
+  if (e.key === "Escape") setStage(false);
+  else if (e.key === "c" || e.key === "C") stageClear();
+  else if (e.key === "l" || e.key === "L") replaySource(replay.src === "one" ? "vest" : "one");
+  else if (e.key === "Shift" && !e.repeat) replay.play ? replayStop() : replayPlay();
+  else if (e.key === "t" || e.key === "T") replayRelevel(replay.boost, !replay.taps);
+  else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    e.preventDefault();
+    replayRelevel(replay.boost + (e.key === "ArrowUp" ? 3 : -3), replay.taps);
+  }
+  else if (e.key === " ") {
+    e.preventDefault();
+    if (!e.repeat) replayRecord(true);
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === " " && replay.rec) replayRecord(false);
+});
+window.addEventListener("blur", () => replayRecord(false));
+cv.addEventListener("pointerdown", (e) => {
+  if (!S.stage) return;
+  const b = cv.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top;
+  for (const [src, r] of Object.entries(stage.hit)) {
+    if (x >= r.x && x <= r.r && y >= r.y && y <= r.b) replaySource(src);
+  }
+});
 
 async function connect(c) {
   const why = $("why");
@@ -3865,7 +4448,10 @@ async function connect(c) {
 }
 
 const android = /Android/i.test(navigator.userAgent);
+// inside mic_array_app.py: its WebSocket, which only answers while the board is plugged in
+const APP_WS = new URLSearchParams(location.search).get("app");
 function usbConn() {
+  if (APP_WS) return new WsConn(APP_WS, "USB", "looking for the board: plug it in…");
   if (android && "usb" in navigator) return new UsbConn();
   if ("serial" in navigator) return new SerialConn();
   if ("usb" in navigator) return new UsbConn();
@@ -3893,7 +4479,7 @@ $("disconnect").onclick = async () => {
 };
 
 const params = new URLSearchParams(location.search);
-if (!("serial" in navigator) && !("usb" in navigator)) {
+if (!APP_WS && !("serial" in navigator) && !("usb" in navigator)) {
   $("why").textContent = window.isSecureContext
     ? "This browser has no USB access: use Chrome. Demo works anywhere."
     : "Open this page from its https:// address for USB. Demo works anywhere.";
@@ -3907,3 +4493,4 @@ if (cap.on) asrLoad();
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
 if (params.get("ws")) connect(new WsConn(params.get("ws")));
 else if (params.has("demo")) connect(new DemoConn());
+else if (APP_WS) connect(usbConn());
