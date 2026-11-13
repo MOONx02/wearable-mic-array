@@ -220,7 +220,9 @@ class Captioner(threading.Thread):
     def __init__(self, model_name: str):
         super().__init__(daemon=True)
         self.model_name = model_name
-        self.q: queue.Queue = queue.Queue()
+        # Keep latency bounded. Whisper can briefly run slower than real time; retaining every old chunk
+        # makes captions progressively later and can eventually starve the Qt UI of CPU and memory.
+        self.q: queue.Queue = queue.Queue(maxsize=8)
         self.lock = threading.Lock()
         self.lines: deque = deque(maxlen=200)  # dicts: wall, text, angle, kind ('speech' | 'sound')
         self.partial = None  # (text, angle)
@@ -231,8 +233,29 @@ class Captioner(threading.Thread):
         self.transcript_file = None
 
     def feed(self, chunks: list):
-        if chunks:
-            self.q.put(np.concatenate(chunks).astype(np.float64))
+        if not chunks:
+            return
+        audio = np.concatenate(chunks).astype(np.float64)
+        try:
+            self.q.put_nowait(audio)
+        except queue.Full:
+            # Prefer the newest sound. A discontinuity is better than seconds of growing caption and
+            # haptic latency; voice focus will settle again on the following frames.
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.q.put_nowait(audio)
+            except queue.Full:
+                pass
+
+    def discard_pending(self):
+        while True:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                return
 
     def _add(self, text: str, angle, kind: str, dur: float = 0.0):
         now = time.time()

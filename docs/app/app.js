@@ -2801,7 +2801,9 @@ function drawCamera(r) {
     ctx.save();
     ctx.translate(pic.cx, pic.cy);
     ctx.rotate((S.rotate * Math.PI) / 180);
-    if (S.mirror) ctx.scale(-1, 1);
+    // The XIAO ESP32-S3 Sense JPEG is left/right mirrored. Correct the normal view here without
+    // changing sound-direction coordinates; the Mirror button intentionally restores selfie view.
+    if (!S.mirror) ctx.scale(-1, 1);
     const w = S.rotate % 180 ? pic.h : pic.w, h = S.rotate % 180 ? pic.w : pic.h;
     ctx.drawImage(image, -w / 2, -h / 2, w, h);
     ctx.restore();
@@ -3874,9 +3876,32 @@ setInterval(() => {
   maskAsks = streamMask === 0xff ? maskAsks + 1 : 0;
 }, 2000);
 
+let hapticSent = 0, lastHapticAngle = null;
+
+// Send only three bytes: 'A' + signed little-endian azimuth in whole degrees. Five-degree quantizing
+// suppresses direction jitter; a 5 Hz unchanged refresh keeps the firmware watchdog alive (15 bytes/s).
+function sendHapticAngle(angle, now) {
+  const off = angle === null;
+  const quantized = off ? 32767 : Math.round(wrap(angle) / 5) * 5;
+  if (quantized === lastHapticAngle && now - hapticSent < 200) return;
+  const msg = new Uint8Array(3), view = new DataView(msg.buffer);
+  msg[0] = 65;  // 'A'
+  view.setInt16(1, quantized, true);
+  conn.send(msg);
+  lastHapticAngle = quantized;
+  hapticSent = now;
+}
+
 setInterval(() => {
   const t0 = performance.now();
   model.tick(S.thr, t0 < cap.voiceUntil);
+  // Direction finding stays on the tablet. Send the compact angle command back to the board; firmware
+  // maps it to D6/D7 PWM and stops both motors after 500 ms without a refresh.
+  const hapticFirmware = ["v5", "v6", "v7"].some((v) => boardFw.startsWith(`cam_mic_vest8 ${v}`));
+  if (conn && !(conn instanceof DemoConn) && connState === "streaming" && hapticFirmware) {
+    const d = model.last, angle = d && model.now - d.t < 0.35 ? orient(d.angle) : null;
+    sendHapticAngle(angle, t0);
+  }
   if (S.find) findBuzz(S.findMode === "alarm" ? alarm.process() : beacon.process(FIND_MODES[S.findMode].codes));
   else if (cal.on) {
     beacon.process(["calib"]);

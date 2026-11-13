@@ -1,6 +1,7 @@
 .DS_Store
 __pycache__/
 *.pyc
+.pio/
 
 # recordings and generated output
 esp32s3/mic_takes/

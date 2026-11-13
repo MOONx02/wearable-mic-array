@@ -26,6 +26,10 @@
 //   repeats it; with no 'x' for 5 s the board goes back to the plain stream.
 //   'c' = camera off (shut down, saving power; mics and recording carry on), 'C' = back on. The host
 //   repeats 'c'; with no 'c' for 5 s the camera comes back on.
+//   'h' + 2 bytes = 60-degree (D6) and 300-degree (D7) haptic PWM duty, 0..255. Both outputs stop
+//   if another haptic command does not arrive within 500 ms.
+//   'A' + int16 little-endian = sound azimuth in whole degrees (-180..180, + = left); 32767 means off.
+//   The board maps that angle to the same two haptic outputs. This is the web app's lightweight path.
 //   't' + 6 bytes (year-2000, month, day, hour, minute, second) = the computer's clock, in local time.
 //   The card has no clock of its own; without this, file dates show up as 1 Jan 1960.
 //   'W' + uint16 length + JSON = Wi-Fi and server settings, saved on the board. After a take, while it is
@@ -63,6 +67,7 @@
 #include <Preferences.h>
 
 #include "driver/i2s_pdm.h"
+#include "driver/ledc.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_camera.h"
 #include "esp_timer.h"
@@ -78,9 +83,13 @@ constexpr gpio_num_t PIN_PDM_LINE2 = GPIO_NUM_5;  // D4: top pair
 constexpr gpio_num_t PIN_PDM_LINE3 = GPIO_NUM_6;  // D5: back pair
 constexpr int PIN_REC_BUTTON = 3;  // D2
 constexpr int PIN_BOOT_BUTTON = 0;
-constexpr int PIN_STATUS_LED = -1;  // e.g. 43 (D6) once an LED is wired; GPIO21 is taken by the SD card
+constexpr int PIN_STATUS_LED = -1;  // D6 and D7 are reserved for the two haptic outputs
+constexpr int PIN_HAPTIC_60 = 43;    // D6
+constexpr int PIN_HAPTIC_300 = 44;   // D7
 constexpr int PIN_SD_CS = 21, PIN_SD_SCK = 7, PIN_SD_MISO = 8, PIN_SD_MOSI = 9;
 constexpr uint32_t SD_SPI_HZ = 20000000;
+constexpr uint32_t HAPTIC_TIMEOUT_MS = 500;
+constexpr float HAPTIC_ANGLE_GAIN = 1.25f;
 
 constexpr uint32_t SAMPLE_RATE = 16000;
 constexpr uint16_t FRAMES = 128;  // 8 ms; keeps the DMA buffer under the 4092-byte limit
@@ -89,7 +98,7 @@ constexpr int SLOTS = 8;
 constexpr int CHANNELS = 8;
 constexpr uint8_t ALL_MICS = (1 << CHANNELS) - 1;
 constexpr const char *FIRMWARE = "cam_mic_vest8";
-constexpr int FIRMWARE_VERSION = 3;
+constexpr int FIRMWARE_VERSION = 7;
 constexpr const char *MIC_LAYOUT = "vest8: D1 ch0 inner R / ch1 inner L, D3 ch2 outer R / ch3 outer L, "
                                    "D4 ch4 top R / ch5 top L, D5 ch6 back R / ch7 back L (SEL 3V3 = right), clock D0";
 // x toward the wearer's left, y forward, z up (mm), per channel
@@ -428,6 +437,52 @@ static void stamp_now(char *out, size_t n) {
 
 bool camera_ok = false;
 
+static uint32_t haptic_ms = 0;
+
+static void set_haptics(uint8_t duty60, uint8_t duty300) {
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, duty60);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, duty300);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3);
+  haptic_ms = millis();
+}
+
+static void set_haptic_angle(int16_t angle) {
+  if (angle == INT16_MAX) {
+    set_haptics(0, 0);
+    return;
+  }
+  auto duty_at = [angle](float motor_angle) {
+    const float difference = fmodf(angle - motor_angle + 540.0f, 360.0f) - 180.0f;
+    const float duty = 255.0f * HAPTIC_ANGLE_GAIN * fmaxf(0.0f, cosf(difference * PI / 180.0f));
+    return static_cast<uint8_t>(lroundf(fminf(255.0f, duty)));
+  };
+  set_haptics(duty_at(60.0f), duty_at(-60.0f));
+}
+
+static void init_haptics() {
+  ledc_timer_config_t timer = {};
+  timer.speed_mode = LEDC_LOW_SPEED_MODE;
+  timer.duty_resolution = LEDC_TIMER_8_BIT;
+  timer.timer_num = LEDC_TIMER_1;  // timer 0 is the camera's 20 MHz XCLK
+  timer.freq_hz = 20000;
+  timer.clk_cfg = LEDC_AUTO_CLK;
+  ledc_timer_config(&timer);
+  auto configure = [](int pin, ledc_channel_t output) {
+    ledc_channel_config_t channel = {};
+    channel.gpio_num = pin;
+    channel.speed_mode = LEDC_LOW_SPEED_MODE;
+    channel.channel = output;
+    channel.intr_type = LEDC_INTR_DISABLE;
+    channel.timer_sel = LEDC_TIMER_1;
+    channel.duty = 0;
+    channel.hpoint = 0;
+    ledc_channel_config(&channel);
+  };
+  configure(PIN_HAPTIC_60, LEDC_CHANNEL_2);
+  configure(PIN_HAPTIC_300, LEDC_CHANNEL_3);
+}
+
 static void camera_task(void *) {
   uint8_t *pkt = static_cast<uint8_t *>(heap_caps_malloc(16 + MAX_JPEG, MALLOC_CAP_SPIRAM));
   camera_ok = pkt && start_camera(true);
@@ -494,6 +549,18 @@ static void camera_task(void *) {
         set_camera_off(ch == 'c');
         continue;
       }
+      if (ch == 'h') {
+        uint8_t duty[2];
+        if (usb_serial_jtag_read_bytes(duty, sizeof(duty), pdMS_TO_TICKS(50)) == sizeof(duty))
+          set_haptics(duty[0], duty[1]);
+        continue;
+      }
+      if (ch == 'A') {
+        uint8_t raw[2];
+        if (usb_serial_jtag_read_bytes(raw, sizeof(raw), pdMS_TO_TICKS(50)) == sizeof(raw))
+          set_haptic_angle(static_cast<int16_t>(raw[0] | static_cast<uint16_t>(raw[1]) << 8));
+        continue;
+      }
       framesize_t fs = ch == '1' ? FRAMESIZE_QVGA : ch == '2' ? FRAMESIZE_VGA : ch == '3' ? FRAMESIZE_SVGA : FRAMESIZE_INVALID;
       if (camera_ok && fs != FRAMESIZE_INVALID) {
         sensor_t *s = esp_camera_sensor_get();
@@ -503,6 +570,10 @@ static void camera_task(void *) {
     }
     if (usb_escape.load() && millis() - escape_ms.load() > ESCAPE_HOLD_MS) set_escape(false);
     if (cam_off && millis() - cam_off_ms > CAMERA_OFF_HOLD_MS) set_camera_off(false);
+    if (haptic_ms && millis() - haptic_ms > HAPTIC_TIMEOUT_MS) {
+      set_haptics(0, 0);
+      haptic_ms = 0;
+    }
     if (millis() - last_status > 5000) {
       send_firmware_status();
       if (cam_off) {
@@ -1208,6 +1279,7 @@ void setup() {
   pinMode(PIN_REC_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BOOT_BUTTON, INPUT_PULLUP);
   if (PIN_STATUS_LED >= 0) pinMode(PIN_STATUS_LED, OUTPUT);
+  init_haptics();
   if (!audio_ring.init(AUDIO_RING) || !video_ring.init(VIDEO_RING) || !escape_buf)
     fail("PSRAM for recording buffers", ESP_ERR_NO_MEM);
 

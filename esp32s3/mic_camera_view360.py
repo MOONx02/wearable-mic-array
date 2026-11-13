@@ -278,22 +278,34 @@ class Reader8(cv.Reader):
             time.sleep(0.5)
 
     def _unescape(self, data: bytes) -> bytes:
-        """FE 00 -> 0xFE, FE 01 -> 0xFF. A trailing FE waits for its partner."""
+        """FE 00 -> 0xFE, FE 01 -> 0xFF. A trailing FE waits for its partner.
+
+        A reconnect can start in the middle of a plain packet while ``esc`` still reflects the prior
+        connection. Treat an invalid FE pair as a literal FE and continue scanning instead of letting a
+        byte value above 255 kill the reader thread.
+        """
         if not self.esc_half and 0xFE not in data:
             return data
         out = bytearray()
         i = 0
         if self.esc_half and data:
-            out.append(0xFE + data[0])
-            i = 1
+            if data[0] <= 1:
+                out.append(0xFE + data[0])
+                i = 1
+            else:
+                out.append(0xFE)
             self.esc_half = False
         while i < len(data):
             if data[i] != 0xFE:
                 out.append(data[i])
                 i += 1
             elif i + 1 < len(data):
-                out.append(0xFE + data[i + 1])
-                i += 2
+                if data[i + 1] <= 1:
+                    out.append(0xFE + data[i + 1])
+                    i += 2
+                else:
+                    out.append(0xFE)
+                    i += 1
             else:
                 self.esc_half = True
                 break
@@ -1442,6 +1454,8 @@ def main():
 
     def on_captions(v):
         view.show_captions = v
+        if not v and captioner is not None:
+            captioner.discard_pending()
 
     def on_focus(v):
         captioner.focus.enabled = v
@@ -1452,7 +1466,25 @@ def main():
     def tick():
         chunks = reader.take()
         model.push(chunks)
-        if captioner is not None:
+        # The board owns the two PWM outputs; direction finding remains here. Refresh at 10 Hz so the
+        # firmware's 500 ms watchdog turns both motors off if this app or the USB connection stops.
+        now = time.monotonic()
+        haptic_firmware = reader.board_fw.startswith(("cam_mic_vest8 v4", "cam_mic_vest8 v5", "cam_mic_vest8 v6", "cam_mic_vest8 v7")) if isinstance(reader, Reader8) else False
+        if haptic_firmware:
+            det = model.last_det
+            angle = view.oriented(det[1]) if det and model.now - det[0] < 0.35 else None
+            duties = []
+            for motor_angle in (60.0, -60.0):  # first byte: D6 at 60 degrees; second: D7 at 300 degrees
+                separation = wrap(angle - motor_angle) if angle is not None else 180.0
+                duties.append(round(255 * max(0.0, math.cos(math.radians(separation)))))
+            duties = tuple(duties)
+            # Send a changed direction on this UI tick; unchanged duties still refresh at 10 Hz for the
+            # firmware watchdog. This removes up to 100 ms from sound-to-haptic response.
+            if duties != tick.last_haptic or now >= tick.next_haptic:
+                reader.send(bytes((ord("h"), *duties)))
+                tick.last_haptic = duties
+                tick.next_haptic = now + 0.1
+        if captioner is not None and captions.isChecked():
             captioner.feed([c[:, cap_chans] for c in chunks])
         view.update_frame()
         recs = f"  ● REC {model.record_path.name}" if model.recorder else ""
@@ -1467,6 +1499,9 @@ def main():
         status.setText(f"⚠ {warn}" if warn and compact else
                        f"{reader.port or '-'} · {reader.status}{fw}{caps}{recs}" + (f" · ⚠ {warn}" if warn else ""))
         view.update()
+
+    tick.next_haptic = 0.0
+    tick.last_haptic = None
 
     timer = QTimer()
     timer.timeout.connect(tick)
