@@ -37,17 +37,16 @@ const VEST6 = { 0: ["inner R", -22.9, 0, 0], 1: ["inner L", 22.9, 0, 0], 2: ["ou
 // cam_mic_vest8: the chest plate plus the back plate's pair, level with the row, chest to back as worn
 const BACK_DEPTH_MM = 150;
 const VEST8 = { ...VEST6, 6: ["back R", -68.6, -BACK_DEPTH_MM, 0], 7: ["back L", 68.6, -BACK_DEPTH_MM, 0] };
-// mirrored 4 + 4 (vest_plates_4x4.scad): chest outer + raised tab; back outer + raised tab (D1 moved to the back)
-// rise 100 mm matches the printed plates; same firmware channels as vest8
+// mirrored 4 + 4 plates: front 0–3, rear 4–7; top = raised tab (±22.9), bottom = row (±68.6); rise 100 mm
 const RISE_MM = 100;
 const VEST4X4 = {
-  0: ["back top R", -22.9, -BACK_DEPTH_MM, RISE_MM], 1: ["back top L", 22.9, -BACK_DEPTH_MM, RISE_MM],
-  2: ["outer R", -68.6, 0, 0], 3: ["outer L", 68.6, 0, 0],
-  4: ["top R", -22.9, 0, RISE_MM], 5: ["top L", 22.9, 0, RISE_MM],
-  6: ["back R", -68.6, -BACK_DEPTH_MM, 0], 7: ["back L", 68.6, -BACK_DEPTH_MM, 0],
+  0: ["front top R", -22.9, 0, RISE_MM], 1: ["front top L", 22.9, 0, RISE_MM],
+  2: ["front bottom R", -68.6, 0, 0], 3: ["front bottom L", 68.6, 0, 0],
+  4: ["rear top R", -22.9, -BACK_DEPTH_MM, RISE_MM], 5: ["rear top L", 22.9, -BACK_DEPTH_MM, RISE_MM],
+  6: ["rear bottom R", -68.6, -BACK_DEPTH_MM, 0], 7: ["rear bottom L", 68.6, -BACK_DEPTH_MM, 0],
 };
 const PRESETS = {
-  vest4x4: { name: "8 mics: vest 4 + 4 (chest outer/raised + matching back)", geom: VEST4X4 },
+  vest4x4: { name: "8 mics: vest 4 + 4 (front 0–3, rear 4–7)", geom: VEST4X4 },
   vest8: { name: "8 mics: vest chest 6 + back pair", geom: VEST8 },
   vest6: { name: "6 mics: vest chest, 4 in a row + 2 above", geom: VEST6 },
   rear5: { name: "5 mics: 4 front + rear centre", geom: { ...FRONT, 4: ["rear centre", 0, -22] } },
@@ -1079,7 +1078,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v33";
+const APP_VERSION = "v34";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
