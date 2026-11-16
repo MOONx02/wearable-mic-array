@@ -33,7 +33,8 @@
 //   'h' + 2 bytes = 60-degree (D6) and 300-degree (D7) haptic PWM duty, 0..255. Both outputs stop
 //   if another haptic command does not arrive within 500 ms.
 //   'A' + int16 little-endian = sound azimuth in whole degrees (-180..180, + = left); 32767 means off.
-//   The board maps that angle to the same two haptic outputs. This is the web app's lightweight path.
+//   The board maps front angles to the same two haptic outputs. Rear angles play four taps on the
+//   matching side. This is the web app's lightweight path.
 //   't' + 6 bytes (year-2000, month, day, hour, minute, second) = the computer's clock, in local time.
 //   The card has no clock of its own; without this, file dates show up as 1 Jan 1960.
 //   'W' + uint16 length + JSON = Wi-Fi and server settings, saved on the board. Three button presses join
@@ -95,6 +96,8 @@ constexpr int PIN_SD_CS = 21, PIN_SD_SCK = 7, PIN_SD_MISO = 8, PIN_SD_MOSI = 9;
 constexpr uint32_t SD_SPI_HZ = 20000000;
 constexpr uint32_t HAPTIC_TIMEOUT_MS = 500;
 constexpr float HAPTIC_ANGLE_GAIN = 1.25f;
+constexpr uint32_t HAPTIC_REAR_TAP_MS = 100;
+constexpr int HAPTIC_REAR_TAPS = 4;
 
 constexpr uint32_t SAMPLE_RATE = 16000;
 constexpr uint16_t FRAMES = 128;  // 8 ms; keeps the DMA buffer under the 4092-byte limit
@@ -444,18 +447,36 @@ static void stamp_now(char *out, size_t n) {
 bool camera_ok = false;
 
 static uint32_t haptic_ms = 0;
+static uint32_t rear_haptic_ms = 0;
+static int8_t rear_haptic_side = 0;  // +1 = left/D6, -1 = right/D7
+static bool rear_haptic_active = false;
 
-static void set_haptics(uint8_t duty60, uint8_t duty300) {
+static void write_haptics(uint8_t duty60, uint8_t duty300) {
   ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, duty60);
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
   ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, duty300);
   ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3);
+}
+
+static void set_haptics(uint8_t duty60, uint8_t duty300) {
+  rear_haptic_active = false;
+  write_haptics(duty60, duty300);
   haptic_ms = millis();
 }
 
 static void set_haptic_angle(int16_t angle) {
   if (angle == INT16_MAX) {
-    set_haptics(0, 0);
+    if (!rear_haptic_active) set_haptics(0, 0);
+    return;
+  }
+  if (abs(angle) > 90) {
+    const int8_t side = angle > 0 ? 1 : -1;
+    if (!rear_haptic_active || side != rear_haptic_side) {
+      rear_haptic_ms = millis();
+      rear_haptic_side = side;
+      rear_haptic_active = true;
+    }
+    haptic_ms = millis();
     return;
   }
   auto duty_at = [angle](float motor_angle) {
@@ -464,6 +485,18 @@ static void set_haptic_angle(int16_t angle) {
     return static_cast<uint8_t>(lroundf(fminf(255.0f, duty)));
   };
   set_haptics(duty_at(60.0f), duty_at(-60.0f));
+}
+
+static void update_rear_haptics() {
+  if (!rear_haptic_active) return;
+  const uint32_t step = (millis() - rear_haptic_ms) / HAPTIC_REAR_TAP_MS;
+  if (step >= HAPTIC_REAR_TAPS * 2) {
+    write_haptics(0, 0);
+    rear_haptic_active = false;
+    return;
+  }
+  const uint8_t duty = step % 2 == 0 ? 255 : 0;
+  write_haptics(rear_haptic_side > 0 ? duty : 0, rear_haptic_side < 0 ? duty : 0);
 }
 
 static void init_haptics() {
@@ -576,8 +609,9 @@ static void camera_task(void *) {
     }
     if (usb_escape.load() && millis() - escape_ms.load() > ESCAPE_HOLD_MS) set_escape(false);
     if (cam_off && millis() - cam_off_ms > CAMERA_OFF_HOLD_MS) set_camera_off(false);
-    if (haptic_ms && millis() - haptic_ms > HAPTIC_TIMEOUT_MS) {
-      set_haptics(0, 0);
+    update_rear_haptics();
+    if (!rear_haptic_active && haptic_ms && millis() - haptic_ms > HAPTIC_TIMEOUT_MS) {
+      write_haptics(0, 0);
       haptic_ms = 0;
     }
     if (millis() - last_status > 5000) {

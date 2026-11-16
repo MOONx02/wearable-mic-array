@@ -3944,8 +3944,8 @@ setInterval(() => {
   const t0 = performance.now();
   model.tick(S.thr, t0 < cap.voiceUntil);
   // Direction finding stays on the tablet. Send the compact angle command back to the board; firmware
-  // maps it to D6/D7 PWM and stops both motors after 500 ms without a refresh.
-  const hapticFirmware = ["v5", "v6", "v7"].some((v) => boardFw.startsWith(`cam_mic_vest8 ${v}`));
+  // maps front angles to D6/D7 PWM and rear angles to four taps on the matching side.
+  const hapticFirmware = ["v5", "v6", "v7", "v8"].some((v) => boardFw.startsWith(`cam_mic_vest8 ${v}`));
   if (conn && !(conn instanceof DemoConn) && connState === "streaming" && hapticFirmware) {
     const d = model.last, angle = d && model.now - d.t < 0.35 ? orient(d.angle) : null;
     sendHapticAngle(angle, t0);
