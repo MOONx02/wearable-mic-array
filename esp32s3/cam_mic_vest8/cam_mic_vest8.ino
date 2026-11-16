@@ -16,7 +16,11 @@
 // Controls (record button: D2 to GND; the BOOT button does the same):
 //   one press             start recording, voice only
 //   two presses           start recording, voice + video (second press within 0.5 s of letting go)
+//   three presses         upload every finished take the server hasn't confirmed, then Wi-Fi off
 //   any press while recording   stop
+// Wi-Fi stays off except during that three-press upload: the radio put a steady click on some PDM
+// mics, so we never auto-join after a take. Upload only runs when not recording, so those clicks
+// stay out of the take on the card.
 // Takes shorter than half a second are deleted when they stop.
 // USB commands (single bytes) in addition to cam_mic_stream's '1' '2' '3' frame sizes:
 //   'a' = record voice only, 'v' = record voice + video, 's' = stop.
@@ -32,9 +36,10 @@
 //   The board maps that angle to the same two haptic outputs. This is the web app's lightweight path.
 //   't' + 6 bytes (year-2000, month, day, hour, minute, second) = the computer's clock, in local time.
 //   The card has no clock of its own; without this, file dates show up as 1 Jan 1960.
-//   'W' + uint16 length + JSON = Wi-Fi and server settings, saved on the board. After a take, while it is
-//   not recording, the board joins that Wi-Fi and uploads the take in pieces. Audio and video are deleted
-//   from the card only when "del" is 1 and the server's stored size matches.
+//   'W' + uint16 length + JSON = Wi-Fi and server settings, saved on the board. Three button presses join
+//   that Wi-Fi and upload the takes in pieces; the radio is off the rest of the time because it adds noise
+//   to some mics. Audio and video are deleted from the card only when "del" is 1 and the server's stored
+//   size matches.
 // Mic packets: 'M' 'K', uint32 seq, uint16 frames, uint8 mask, uint8 0, int16 samples of the masked channels.
 //   'k' + one mask byte = stream only those channels (bit n = ch n), for hosts whose USB link can't carry
 //   all eight plus the camera. The host repeats it; with no 'k' for 5 s the board goes back to all eight.
@@ -98,7 +103,7 @@ constexpr int SLOTS = 8;
 constexpr int CHANNELS = 8;
 constexpr uint8_t ALL_MICS = (1 << CHANNELS) - 1;
 constexpr const char *FIRMWARE = "cam_mic_vest8";
-constexpr int FIRMWARE_VERSION = 7;
+constexpr int FIRMWARE_VERSION = 8;  // three-press upload only (Wi-Fi off otherwise) + Kevin haptics
 constexpr const char *MIC_LAYOUT = "vest8: D1 ch0 inner R / ch1 inner L, D3 ch2 outer R / ch3 outer L, "
                                    "D4 ch4 top R / ch5 top L, D5 ch6 back R / ch7 back L (SEL 3V3 = right), clock D0";
 // x toward the wearer's left, y forward, z up (mm), per channel
@@ -205,6 +210,7 @@ std::atomic<bool> rec_on{false};      // producers push into the rings while thi
 std::atomic<bool> rec_video{false};
 std::atomic<uint32_t> rec_epoch{0};   // bumped at every start, so the audio task knows where sample 0 is
 std::atomic<int> rec_request{0};      // 0 none, 1 voice, 2 voice + video, 3 stop
+std::atomic<bool> upload_request{false};
 std::atomic<uint64_t> rec_start_frame{0};
 std::atomic<uint32_t> rec_lost_frames{0};
 std::atomic<uint32_t> rec_video_dropped{0};
@@ -833,7 +839,14 @@ static void write_info(bool final) {
   f.close();
 }
 
+static void wifi_off() {
+  if (WiFi.getMode() == WIFI_OFF) return;
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
 static void start_take(bool video) {
+  wifi_off();
   if (!sd_mount()) {
     send_status("rec: no microSD card found, not recording");
     return;
@@ -1072,7 +1085,7 @@ static void save_net(const char *json) {
   if (net_mux) xSemaphoreTake(net_mux, portMAX_DELAY);
   net_cfg = cfg;
   if (net_mux) xSemaphoreGive(net_mux);
-  send_status(cfg.have ? "wifi: saved %s, upload %s" : "wifi: need a network name, server, and token",
+  send_status(cfg.have ? "wifi: saved %s, press three times to upload %s" : "wifi: need a network name, server, and token",
               cfg.ssid, cfg.del ? "then delete the card copy" : "and keep the card copy");
 }
 
@@ -1154,37 +1167,11 @@ static bool take_complete(const char *take) {
   return strstr(buf, "complete=yes") != nullptr;
 }
 
-static void upload_idle() {
-  NetCfg cfg;
-  if (net_mux) xSemaphoreTake(net_mux, portMAX_DELAY);
-  cfg = net_cfg;
-  if (net_mux) xSemaphoreGive(net_mux);
-  if (!cfg.have || rec_request.load()) return;
-  static uint32_t retry_at = 0;
-  if (WiFi.status() != WL_CONNECTED) {
-    if ((int32_t)(millis() - retry_at) < 0) return;
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-    WiFi.begin(cfg.ssid, cfg.pass);
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) {
-      if (rec_request.load()) return;
-      vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    if (WiFi.status() != WL_CONNECTED) {
-      retry_at = millis() + 20000;
-      send_status("upload: can't join %s", cfg.ssid);
-      return;
-    }
-    send_status("upload: joined %s", cfg.ssid);
-  }
-  static uint32_t next_scan = 0;
-  if ((int32_t)(millis() - next_scan) < 0) return;
-  if (!sd_mount()) return;
+static bool pending_take(char *out, size_t n) {
   File root = SD.open("/takes");
-  if (!root) return;
+  if (!root) return false;
   for (File dir = root.openNextFile(); dir; dir = root.openNextFile()) {
-    if (rec_request.load()) return;
+    if (rec_request.load()) return false;
     if (!dir.isDirectory()) continue;
     const char *raw = dir.name();
     const char *take = strrchr(raw, '/');
@@ -1193,35 +1180,83 @@ static void upload_idle() {
     char receipt[40];
     snprintf(receipt, sizeof(receipt), "/takes/%s/receipt.txt", take);
     if (SD.exists(receipt) || !take_complete(take)) continue;
-    bool ok = upload_one(cfg, take, "info.txt", true) && upload_one(cfg, take, "audio_00.wav", true);
-    for (int i = 1; ok && i < 8; i++) {
-      char name[16];
-      snprintf(name, sizeof(name), "audio_%02d.wav", i);
-      ok = upload_one(cfg, take, name, false);
+    snprintf(out, n, "%s", take);
+    return true;
+  }
+  return false;
+}
+
+static bool upload_take(const NetCfg &cfg, const char *take) {
+  bool ok = upload_one(cfg, take, "info.txt", true) && upload_one(cfg, take, "audio_00.wav", true);
+  for (int i = 1; ok && i < 8; i++) {
+    char name[16];
+    snprintf(name, sizeof(name), "audio_%02d.wav", i);
+    ok = upload_one(cfg, take, name, false);
+  }
+  if (ok) ok = upload_one(cfg, take, "video.bin", false);
+  if (!ok) return false;
+  char receipt[40];
+  snprintf(receipt, sizeof(receipt), "/takes/%s/receipt.txt", take);
+  File rec = SD.open(receipt, FILE_WRITE);
+  if (rec) { rec.println("uploaded=yes"); rec.close(); }
+  if (cfg.del) {
+    for (int i = 0; i < 8; i++) {
+      char path[48];
+      snprintf(path, sizeof(path), "/takes/%s/audio_%02d.wav", take, i);
+      SD.remove(path);
     }
-    if (ok) ok = upload_one(cfg, take, "video.bin", false);
-    if (!ok) {
-      if (!rec_request.load()) send_status("upload: %s stopped, will retry", take);
-      next_scan = millis() + 20000;
-      return;
-    }
-    File rec = SD.open(receipt, FILE_WRITE);
-    if (rec) { rec.println("uploaded=yes"); rec.close(); }
-    if (cfg.del) {
-      SD.remove((String("/takes/") + take + "/audio_00.wav").c_str());
-      for (int i = 1; i < 8; i++) {
-        char path[48];
-        snprintf(path, sizeof(path), "/takes/%s/audio_%02d.wav", take, i);
-        SD.remove(path);
-      }
-      char video[40];
-      snprintf(video, sizeof(video), "/takes/%s/video.bin", take);
-      SD.remove(video);
-      send_status("upload: %s done, audio and video deleted", take);
-    } else send_status("upload: %s done, kept on the card", take);
+    char video[40];
+    snprintf(video, sizeof(video), "/takes/%s/video.bin", take);
+    SD.remove(video);
+    send_status("upload: %s done, audio and video deleted", take);
+  } else send_status("upload: %s done, kept on the card", take);
+  return true;
+}
+
+static void upload_now() {
+  NetCfg cfg;
+  if (net_mux) xSemaphoreTake(net_mux, portMAX_DELAY);
+  cfg = net_cfg;
+  if (net_mux) xSemaphoreGive(net_mux);
+  if (!cfg.have) {
+    send_status("upload: no Wi-Fi saved, set it under Upload in the web app");
     return;
   }
-  next_scan = millis() + 5000;
+  char take[16];
+  if (!sd_mount() || !pending_take(take, sizeof(take))) {
+    send_status("upload: nothing new on the card");
+    return;
+  }
+  send_status("upload: joining %s", cfg.ssid);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(cfg.ssid, cfg.pass);
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    if (rec_request.load()) {
+      wifi_off();
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    wifi_off();
+    send_status("upload: can't join %s", cfg.ssid);
+    return;
+  }
+  int done = 0;
+  bool more = true;
+  while (more) {
+    if (!upload_take(cfg, take)) {
+      if (!rec_request.load()) send_status("upload: %s stopped, press three times to try again", take);
+      wifi_off();
+      return;
+    }
+    done++;
+    more = pending_take(take, sizeof(take));
+  }
+  wifi_off();
+  send_status("upload: finished, %d take%s sent, Wi-Fi off", done, done == 1 ? "" : "s");
 }
 
 static void sd_task(void *) {
@@ -1235,8 +1270,8 @@ static void sd_task(void *) {
     if (req == 3 && recording) stop_take();
     else if ((req == 1 || req == 2) && !recording) start_take(req == 2);
     if (take.number == 0) {
-      upload_idle();
-      vTaskDelay(pdMS_TO_TICKS(rec_request.load() ? 5 : 200));
+      if (upload_request.exchange(false) && !rec_request.load()) upload_now();
+      vTaskDelay(pdMS_TO_TICKS(rec_request.load() ? 5 : 50));
       continue;
     }
     bool did = drain();
@@ -1275,6 +1310,7 @@ void setup() {
   usb_mux = xSemaphoreCreateMutex();
   net_mux = xSemaphoreCreateMutex();
   escape_buf = static_cast<uint8_t *>(heap_caps_malloc(2 * (16 + MAX_JPEG), MALLOC_CAP_SPIRAM));
+  wifi_off();  // never leave the radio up; it clicks into some PDM mics
 
   pinMode(PIN_REC_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BOOT_BUTTON, INPUT_PULLUP);
@@ -1312,7 +1348,8 @@ void setup() {
   xTaskCreatePinnedToCore(sd_task, "sd", 8192, nullptr, 2, nullptr, 0);
 }
 
-// Buttons: one press = voice, two quick presses = voice + video, any press while recording = stop.
+// Buttons: one press = voice, two quick presses = voice + video, three = upload the card's new takes,
+// any press while recording = stop.
 void loop() {
   static bool was_down = false;
   static uint32_t changed = 0, last_release = 0;
@@ -1335,7 +1372,8 @@ void loop() {
   }
   // The double-press window runs from the release, so a slow first press still counts.
   if (presses && !down && now - last_release > DOUBLE_PRESS_MS) {
-    rec_request.store(presses >= 2 ? 2 : 1);
+    if (presses >= 3) upload_request.store(true);
+    else rec_request.store(presses == 2 ? 2 : 1);
     presses = 0;
   }
   vTaskDelay(pdMS_TO_TICKS(10));
