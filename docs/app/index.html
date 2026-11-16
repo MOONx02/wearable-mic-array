@@ -30,6 +30,11 @@
   #calbar.open { display: flex; }
   #calbar b { color: #56d4dd; }
   #calinfo { color: #e6edf3; }
+  #testbar { display: none; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 8px 4px; color: #8b949e;
+    border-top: 1px solid #30363d; }
+  #testbar.open { display: flex; }
+  #testbar b { color: #e3b341; }
+  #testinfo { color: #e6edf3; }
   #calbar input[type=number], #more input[type=number] { width: 56px; background: #21262d; color: #e6edf3; border: 1px solid #30363d;
     border-radius: 6px; padding: 6px; font: inherit; }
   #status { display: flex; gap: 12px; color: #8b949e; font-size: 12px; padding: 0 10px 4px; white-space: nowrap; }
@@ -79,6 +84,7 @@
     <option value="follow">Follow a leader</option>
     <option value="alarm">Where's the alarm</option>
     <option value="evac">Evacuate</option>
+    <option value="test">DOA test</option>
   </select>
   <button id="calib" title="Line the sound marks up with the picture: a phone plays a chirp from spots you put it on">Calibrate</button>
   <button id="cam" class="on" title="Turn the camera off to save the tablet's and the board's power; the radar gets big">Camera</button>
@@ -128,6 +134,14 @@
   <label title="Distance used for talkers when the camera is off-centre on the vest">Talkers at <input id="usualdist" type="number" min="0.3" max="10" step="0.5"> m</label>
   <span id="calinfo"></span>
   <button id="caldone">Done</button>
+</div>
+<div id="testbar">
+  <b>DOA test</b>
+  <button id="testready" title="Arm listening for the next phone TEST chirp">Ready</button>
+  <button id="testright" disabled title="The shown direction looked correct">Right</button>
+  <button id="testwrong" disabled title="The shown direction looked wrong">Wrong</button>
+  <button id="testfinish" disabled title="Download a report of this session">Finish report</button>
+  <span id="testinfo"></span>
 </div>
 <div id="status"><span id="hint">Calibrate: put a phone playing the calibration chirp on spots in the picture</span><span id="conn">not connected</span></div>
 <div id="wrap">

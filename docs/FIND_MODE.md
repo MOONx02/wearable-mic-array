@@ -13,6 +13,7 @@ with vibration, so it also works for someone who can't hear the sound at all.
   - [Follow a leader](#follow-a-leader)
   - [Where's the alarm](#wheres-the-alarm)
   - [Evacuate](#evacuate)
+  - [DOA test](#doa-test)
 - [The beacon page](#the-beacon-page)
 - [Trying it without hardware (Demo)](#trying-it-without-hardware-demo)
 - [How it works](#how-it-works)
@@ -40,10 +41,11 @@ and CPU for the direction finding.
 
 1. Open the app on the tablet: <https://moonx02.github.io/wearable-mic-array/app/>. Connect
    the board over USB (or tap **Demo**). The status line should start with **v13** or later.
-2. Tap **Find**. A menu appears next to it. Pick **Follow a leader**, **Where's the alarm** or
-   **Evacuate**.
+2. Tap **Find**. A menu appears next to it. Pick **Follow a leader**, **Where's the alarm**,
+   **Evacuate**, or **DOA test**.
 3. For Follow and Evacuate, open the beacon page on other phones (links below), turn the media
    volume up, and tap **Start**. The alarm finder needs no beacons; it listens for real alarms.
+   For DOA test, open the Test beacon and use **Ready** / **TEST** / Right or Wrong (see below).
 4. Follow the arrow in the **Find** panel. Feel for the buzzes (Android tablets and phones).
 
 | Beacon role | Link to open on the phone |
@@ -51,6 +53,7 @@ and CPU for the direction finding.
 | Leader | <https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=leader> |
 | Exit | <https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=exit> |
 | Danger | <https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=danger> |
+| Test | <https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=test> |
 
 Tip: print these links as QR codes and stick them on the phones you use as beacons.
 
@@ -123,10 +126,24 @@ Before any beacon is heard, the panel shows which links to open on the beacon ph
 (Screenshots were taken on a local test server, so the links show `127.0.0.1`; on the live site
 they show the `moonx02.github.io` address.)
 
+### DOA test
+
+Check how often the array points the right way. The tablet grades each trial; the phone only
+plays a short tone.
+
+1. On the tablet: **Find → DOA test**, then tap **Ready**.
+2. On a phone open the [Test beacon](https://moonx02.github.io/wearable-mic-array/app/beacon.html?role=test),
+   stand where you want to check, turn the volume up, and tap **TEST** (one chirp, not a loop).
+3. The tablet shows the estimated direction. Tap **Right** or **Wrong**.
+4. Repeat from Ready for more spots. Tap **Finish report** to download a markdown and CSV
+   summary (accuracy %, each trial’s angle, match score, and verdict).
+
+In **Demo**, Ready triggers one synthetic test chirp so you can walk through the flow without a phone.
+
 ## The beacon page
 
-Any phone with a browser becomes a beacon: open the page, pick a role, tap **Start**. The page
-keeps the screen on while it plays, and the dot flashes with each chirp.
+Any phone with a browser becomes a beacon: open the page, pick a role, tap **Start** (or **TEST**
+for the Test role). The page keeps the screen on while it plays, and the dot flashes with each chirp.
 
 ![The beacon page in its three roles: Leader, Exit and Danger](find/beacon_roles.png)
 
@@ -146,6 +163,7 @@ scene, mixed with recorded talkers and claps from around the array and a fan beh
 | Follow a leader | A leader circling the wearer and walking nearer and farther |
 | Where's the alarm | A 3.1 kHz fire alarm in the temporal-3 pattern (three 0.5 s beeps, pause) |
 | Evacuate | Two exits (one loud, one quiet, behind) and a danger |
+| DOA test | One test chirp after each Ready |
 
 In all three the simulated wearer turns slowly, so the arrows move the way they would if you
 turned in place.

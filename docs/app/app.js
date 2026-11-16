@@ -51,7 +51,7 @@ const S = Object.assign({ layout: "vest8", hfov: 60, offset: 0, tilt: 0, swap: f
                           wifiSsid: "", wifiPass: "", upUrl: "http://187.77.27.36:8780", upToken: "", upDel: false },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
-if (!["follow", "alarm", "evac"].includes(S.findMode)) S.findMode = "follow";
+if (!["follow", "alarm", "evac", "test"].includes(S.findMode)) S.findMode = "follow";
 if (!PRESETS[S.layout]) S.layout = "vest8";
 if (!S.vest8) {  // once: tablets that saved the six-mic vest move to the eight-mic one
   if (S.layout === "vest6") S.layout = "vest8";
@@ -539,12 +539,15 @@ const CODES = {
   exit: { name: "Exit", shape: [[0, CHIRP_HI], [1, CHIRP_LO]], period: 0.5, color: FOX },
   danger: { name: "Danger", shape: [[0, CHIRP_LO], [0.5, CHIRP_HI], [1, CHIRP_LO]], period: 0.3, color: DANGER },
   calib: { name: "Calibration", shape: [[0, CHIRP_HI], [0.5, CHIRP_LO], [1, CHIRP_HI]], period: 0.4, color: "#56d4dd" },
+  // same V-shape as calib; Find → DOA test listens for this (beacon.html?role=test plays it once)
+  test: { name: "Test", shape: [[0, CHIRP_HI], [0.5, CHIRP_LO], [1, CHIRP_HI]], period: 0.4, color: ALARM_COL },
 };
 const KINDS = { ...CODES, alarm: { name: "Alarm", color: ALARM_COL } };
 const FIND_MODES = {
   follow: { name: "Follow a leader", codes: ["leader"] },
   alarm: { name: "Where's the alarm", codes: [] },
   evac: { name: "Evacuate", codes: ["exit", "danger"] },
+  test: { name: "DOA test", codes: ["test"] },
 };
 const kindColor = (d) => (d.kind ? KINDS[d.kind].color : d.strength > 30 ? LOUD : GLOW);
 
@@ -1066,7 +1069,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v31";
+const APP_VERSION = "v32";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -1244,8 +1247,15 @@ class DemoConn {  // no board: recorded speech and claps from all round the arra
           for (let f = 0; f < frames; f++) {
             if (!ev && --wait <= 0) { ev = this.next(); pos = 0; }
             const n = made + f, fi = n & 65535;
-            if (S.find) {
-              for (const e of DEMO_FIND[S.findMode]) {
+            if (S.find && S.findMode === "test") {
+              // one chirp after Ready (doaTest.demoArm), matching the phone's one-shot TEST
+              if (doaTest.armed && doaTest.demoArm && n >= doaTest.demoArm) {
+                const t = n / FS;
+                finds.push({ sig: spatial(codeChirp("test"), wrap(50 - t * 5), false, 1000, "peak", 8), pos: 0 });
+                doaTest.demoArm = 0;
+              }
+            } else if (S.find) {
+              for (const e of DEMO_FIND[S.findMode] || []) {
                 nextAt[e.id] ??= n + (e.phase || 0) * FS;
                 if (n < nextAt[e.id]) continue;
                 const t = n / FS, k = (count[e.id] = (count[e.id] || 0) + 1);
@@ -1566,6 +1576,13 @@ const CAL_FORCE_S = 6;    // steady but off the cross this long: captured anyway
 const cal = { on: false, target: 0, custom: null, since: 0, pic: null, last: null,
               guide: true, step: 0, lastDir: null, offSince: null, status: "" };
 const calRecent = () => model.dets.filter((d) => d.kind === "calib" && d.t > cal.since && model.now - d.t < CAL_HITS_S);
+
+// Find → DOA test: Ready arms listening; phone TEST chirp → pending direction → Right/Wrong → Finish report
+const doaTest = { armed: false, pending: null, trials: [], started: 0, demoArm: 0 };
+const testScore = () => {
+  const n = doaTest.trials.length, ok = doaTest.trials.filter((t) => t.verdict === "right").length;
+  return { n, ok, pct: n ? Math.round((100 * ok) / n) : 0 };
+};
 // the spot the phone should be on: picture fractions, and half picture widths from the centre (X right, Y up)
 function calSpot() {
   const [fx, fy] = cal.custom || CAL_TARGETS[cal.target].slice(1), aspect = cal.pic ? cal.pic.h / cal.pic.w : 0.75;
@@ -3163,7 +3180,8 @@ function drawGauge(r) {
     const up = upText(d);
     text(`${up ? `${up} · ` : ""}${fbText(d)} · ${d.n} mics`, r.cx, r.y + 62, 12, DIM, "center", false, true);
   } else {
-    const idle = { follow: "listening for the leader…", alarm: "listening for an alarm…", evac: "listening for exit and danger tones…" };
+    const idle = { follow: "listening for the leader…", alarm: "listening for an alarm…",
+      evac: "listening for exit and danger tones…", test: doaTest.armed ? "listening for TEST…" : "DOA test · tap Ready" };
     text(S.find ? idle[S.findMode] : "clap, snap or talk", r.cx, r.y + 46, 15, DIM, "center");
   }
   ctx.beginPath();
@@ -3311,6 +3329,25 @@ function drawFinder(r) {
     }
   };
   const noBack = (d) => d.fb === null;
+
+  if (S.findMode === "test") {
+    const url = beaconUrl("test"), { n, ok, pct } = testScore();
+    const scoreLine = n ? `${ok}/${n} right (${pct}%)` : "no trials yet";
+    if (doaTest.pending) {
+      const p = doaTest.pending, a = p.angle, col = ALARM_COL;
+      dial([[a, col, 6]]);
+      text(turnText(a), tx, cy - 22, big, col, "left", true);
+      const elev = p.elev === null || p.elev === undefined ? "" : ` · ${Math.abs(p.elev).toFixed(0)}° ${p.elev >= 0 ? "up" : "down"}`;
+      text(`${sideText(a)}${elev}`, tx, cy + 6, 15, INK, "left", true);
+      text(`${(100 * p.score).toFixed(0)}% match · Right or Wrong?`, tx, cy + 28, 13, DIM);
+      text(scoreLine, tx, cy + 46, 12, DIM);
+      return;
+    }
+    if (doaTest.armed) {
+      return idle(["Listening for TEST…", "", "On the phone open", url, "stand where you want to check, then tap TEST.", "", scoreLine], [url]);
+    }
+    return idle(["DOA test", "", "1. Tap Ready on this tablet", "2. On a phone open", url, "3. Go to a spot and tap TEST", "4. Mark Right or Wrong", "5. Finish report when done", "", scoreLine], [url]);
+  }
 
   if (S.findMode === "follow") {
     const s = tracks(beacon.dets, "leader", 6).sort((a, b) => a.age - b.age)[0];  // where they are now, not where they were
@@ -3902,8 +3939,10 @@ setInterval(() => {
     const d = model.last, angle = d && model.now - d.t < 0.35 ? orient(d.angle) : null;
     sendHapticAngle(angle, t0);
   }
-  if (S.find) findBuzz(S.findMode === "alarm" ? alarm.process() : beacon.process(FIND_MODES[S.findMode].codes));
-  else if (cal.on) {
+  if (S.find) {
+    if (S.findMode === "test") testCapture(beacon.process(["test"]));
+    else findBuzz(S.findMode === "alarm" ? alarm.process() : beacon.process(FIND_MODES[S.findMode].codes));
+  } else if (cal.on) {
     beacon.process(["calib"]);
     calAuto();
   }
@@ -3949,6 +3988,23 @@ function uiSync() {
   $("thr").value = S.thr;
   $("thrv").textContent = `${S.thr} dB`;
   $("layout").value = S.layout;
+  testBarSync();
+}
+
+function testBarSync() {
+  const on = S.find && S.findMode === "test";
+  $("testbar").classList.toggle("open", on);
+  if (!on) return;
+  const pending = !!doaTest.pending, { n, ok, pct } = testScore();
+  $("testready").classList.toggle("on", doaTest.armed && !pending);
+  $("testready").disabled = pending;
+  $("testright").disabled = !pending;
+  $("testwrong").disabled = !pending;
+  $("testfinish").disabled = n === 0;
+  $("testinfo").textContent = pending
+    ? `Heard ${sideText(doaTest.pending.angle)} · mark Right or Wrong`
+    : doaTest.armed ? "Listening for phone TEST…"
+      : n ? `${ok}/${n} right (${pct}%) · Ready for next` : "Tap Ready, then TEST on the phone";
 }
 
 for (const [k, p] of Object.entries(PRESETS)) {
@@ -4413,15 +4469,132 @@ function setFind(on) {
   model.last = null;
   beacon.reset();
   alarm.reset();
+  doaTest.armed = false;
+  doaTest.pending = null;
+  doaTest.demoArm = 0;
   if (on && cap.on) { setCC(false); asrUnload(); }
   const hints = {
     follow: "Follow: the leader plays the Leader tone (beacon page); follow the green arrow, it buzzes when they're straight ahead",
     alarm: "Alarm: shows which way a beeping or steady alarm is; long buzz when one starts",
     evac: "Evacuate: phones play Exit or Danger tones (beacon page); go where the green arrow points, away from red",
+    test: `DOA test: tap Ready, then on a phone open ${beaconUrl("test")} and tap TEST at each spot; mark Right or Wrong, Finish for a report`,
   };
   if (on && cal.on) setCal(false);
   hint(on ? hints[S.findMode] : "Calibrate: put a phone playing the calibration chirp on spots in the picture");
 }
+
+function testCapture(found) {
+  if (!doaTest.armed || doaTest.pending || !found.length) return;
+  const hit = found.filter((d) => d.kind === "test").sort((a, b) => b.score - a.score)[0];
+  if (!hit) return;
+  doaTest.armed = false;
+  doaTest.demoArm = 0;
+  doaTest.pending = {
+    t: hit.t,
+    at: hit.at,
+    angle: orient(hit.angle),
+    elev: hit.elev ?? null,
+    score: hit.score,
+    fb: hit.fb,
+    wall: Date.now(),
+  };
+  if (!doaTest.started) doaTest.started = Date.now();
+  hint(`Heard: ${sideText(doaTest.pending.angle)}. Mark Right or Wrong.`);
+  testBarSync();
+}
+
+function testGrade(verdict) {
+  if (!doaTest.pending) return;
+  const p = doaTest.pending;
+  doaTest.trials.push({
+    n: doaTest.trials.length + 1,
+    wall: p.wall,
+    t: p.t,
+    angle: p.angle,
+    elev: p.elev,
+    score: p.score,
+    fb: p.fb,
+    verdict,
+  });
+  doaTest.pending = null;
+  const { n, ok, pct } = testScore();
+  hint(`${verdict === "right" ? "Marked right" : "Marked wrong"} · ${ok}/${n} (${pct}%). Tap Ready for the next spot.`);
+  testBarSync();
+}
+
+function testReady() {
+  if (doaTest.pending) return;
+  beacon.reset();
+  model.dets = model.dets.filter((d) => d.kind !== "test");
+  doaTest.armed = true;
+  doaTest.pending = null;
+  doaTest.demoArm = model.total + Math.round(0.35 * FS);  // Demo: one chirp shortly after Ready
+  if (!doaTest.started) doaTest.started = Date.now();
+  hint(`Listening… on the phone open ${beaconUrl("test")} and tap TEST.`);
+  testBarSync();
+}
+
+function testReport() {
+  const { n, ok, pct } = testScore();
+  if (!n) return;
+  const when = new Date();
+  const stamp = when.toISOString().slice(0, 16).replace("T", "-").replace(":", "");
+  const started = doaTest.started ? new Date(doaTest.started).toISOString() : when.toISOString();
+  const elevStr = (e) => (e === null || e === undefined ? "—" : `${e.toFixed(1)}°`);
+  const lines = [
+    "# DOA test report",
+    "",
+    `- App: ${APP_VERSION}`,
+    `- Layout: ${S.layout}${PRESETS[S.layout] ? ` (${PRESETS[S.layout].name})` : ""}`,
+    `- Firmware: ${boardFw || "unknown"}`,
+    `- Session started: ${started}`,
+    `- Report written: ${when.toISOString()}`,
+    `- Trials: ${n}`,
+    `- Right: ${ok}`,
+    `- Wrong: ${n - ok}`,
+    `- Accuracy: ${pct}%`,
+    "",
+    "| # | time | azimuth ° | elev | match % | verdict |",
+    "|---|---|---|---|---|---|",
+  ];
+  for (const t of doaTest.trials) {
+    const clock = new Date(t.wall).toISOString().slice(11, 19);
+    lines.push(`| ${t.n} | ${clock} | ${t.angle.toFixed(1)} | ${elevStr(t.elev)} | ${(100 * t.score).toFixed(0)} | ${t.verdict} |`);
+  }
+  lines.push("");
+  const md = lines.join("\n");
+  const csv = ["n,time_iso,azimuth_deg,elev_deg,match,verdict"]
+    .concat(doaTest.trials.map((t) => [
+      t.n,
+      new Date(t.wall).toISOString(),
+      t.angle.toFixed(2),
+      t.elev === null || t.elev === undefined ? "" : t.elev.toFixed(2),
+      t.score.toFixed(3),
+      t.verdict,
+    ].join(",")))
+    .join("\n");
+  const download = (name, body, type) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([body], { type }));
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+  download(`doa-test-${stamp}.md`, md, "text/markdown");
+  download(`doa-test-${stamp}.csv`, csv + "\n", "text/csv");
+  doaTest.trials = [];
+  doaTest.pending = null;
+  doaTest.armed = false;
+  doaTest.started = 0;
+  doaTest.demoArm = 0;
+  hint(`Report downloaded (${pct}% right of ${n}). Tap Ready to start a new session.`);
+  testBarSync();
+}
+
+$("testready").onclick = () => testReady();
+$("testright").onclick = () => testGrade("right");
+$("testwrong").onclick = () => testGrade("wrong");
+$("testfinish").onclick = () => testReport();
 
 $("cc").onclick = () => {
   if (!cap.on && S.find) setFind(false);
