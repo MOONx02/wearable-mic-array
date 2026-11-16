@@ -37,7 +37,17 @@ const VEST6 = { 0: ["inner R", -22.9, 0, 0], 1: ["inner L", 22.9, 0, 0], 2: ["ou
 // cam_mic_vest8: the chest plate plus the back plate's pair, level with the row, chest to back as worn
 const BACK_DEPTH_MM = 150;
 const VEST8 = { ...VEST6, 6: ["back R", -68.6, -BACK_DEPTH_MM, 0], 7: ["back L", 68.6, -BACK_DEPTH_MM, 0] };
+// mirrored 4 + 4 (vest_plates_4x4.scad): chest outer + raised tab; back outer + raised tab (D1 moved to the back)
+// rise 100 mm matches the printed plates; same firmware channels as vest8
+const RISE_MM = 100;
+const VEST4X4 = {
+  0: ["back top R", -22.9, -BACK_DEPTH_MM, RISE_MM], 1: ["back top L", 22.9, -BACK_DEPTH_MM, RISE_MM],
+  2: ["outer R", -68.6, 0, 0], 3: ["outer L", 68.6, 0, 0],
+  4: ["top R", -22.9, 0, RISE_MM], 5: ["top L", 22.9, 0, RISE_MM],
+  6: ["back R", -68.6, -BACK_DEPTH_MM, 0], 7: ["back L", 68.6, -BACK_DEPTH_MM, 0],
+};
 const PRESETS = {
+  vest4x4: { name: "8 mics: vest 4 + 4 (chest outer/raised + matching back)", geom: VEST4X4 },
   vest8: { name: "8 mics: vest chest 6 + back pair", geom: VEST8 },
   vest6: { name: "6 mics: vest chest, 4 in a row + 2 above", geom: VEST6 },
   rear5: { name: "5 mics: 4 front + rear centre", geom: { ...FRONT, 4: ["rear centre", 0, -22] } },
@@ -45,14 +55,14 @@ const PRESETS = {
   front4: { name: "4 front mics (no front/back)", geom: { ...FRONT } },
 };
 
-const S = Object.assign({ layout: "vest8", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
+const S = Object.assign({ layout: "vest4x4", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
                           mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow",
                           roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true, camOff: false,
                           wifiSsid: "", wifiPass: "", upUrl: "http://187.77.27.36:8780", upToken: "", upDel: false },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
 if (!["follow", "alarm", "evac", "test"].includes(S.findMode)) S.findMode = "follow";
-if (!PRESETS[S.layout]) S.layout = "vest8";
+if (!PRESETS[S.layout]) S.layout = "vest4x4";
 if (!S.vest8) {  // once: tablets that saved the six-mic vest move to the eight-mic one
   if (S.layout === "vest6") S.layout = "vest8";
   S.vest8 = true;
@@ -1069,7 +1079,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v32";
+const APP_VERSION = "v33";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -1467,9 +1477,11 @@ const parser = new Parser({
       boardFw = msg.slice(10);
       // the board says which mics it has: switch to that layout once per connection, so it can still be changed
       const lay = /layout (\w+)/.exec(boardFw)?.[1];
+      // vest8 firmware and vest4x4 plates share the same channels; keep whichever 8-mic plate geom the user picked
+      const same8 = (lay === "vest8" || lay === "vest4x4") && (S.layout === "vest8" || S.layout === "vest4x4");
       if (lay && PRESETS[lay] && !fwLayoutDone) {
         fwLayoutDone = true;
-        if (S.layout !== lay) {
+        if (S.layout !== lay && !same8) {
           S.layout = lay;
           model.setGeom(PRESETS[lay].geom);
           save();
