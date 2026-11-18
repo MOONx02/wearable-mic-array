@@ -56,10 +56,12 @@ const PRESETS = {
 
 const S = Object.assign({ layout: "vest4x4", hfov: 60, offset: 0, tilt: 0, swap: false, swapfb: false, rotate: 0,
                           mirror: false, thr: 12, cc: true, focus: true, find: false, findMode: "follow",
-                          roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [], calFine: true, camOff: false,
+                          vibrate: true, roll: 0, kel: 1, camX: 0, camZ: 0, dist: 1.5, calDist: 1, cal: [],
+                          calFine: true, camOff: false,
                           wifiSsid: "", wifiPass: "", upUrl: "http://187.77.27.36:8780", upToken: "", upDel: false },
                         JSON.parse(localStorage.getItem("mic360") || "{}"));
 if (S.find) S.cc = false;
+if (S.vibrate === undefined) S.vibrate = true;
 if (!["follow", "alarm", "evac", "test"].includes(S.findMode)) S.findMode = "follow";
 if (!PRESETS[S.layout]) S.layout = "vest4x4";
 if (!S.vest8) {  // once: tablets that saved the six-mic vest move to the eight-mic one
@@ -1078,7 +1080,7 @@ class SerialConn {  // Web Serial (desktop Chrome / Edge, newer Android Chrome)
   }
 }
 
-const APP_VERSION = "v34";
+const APP_VERSION = "v35";
 const MAX_USB_READ = 131072;  // about 1/3 s of stream; bigger only adds lag
 
 class UsbConn {  // WebUSB, talking USB CDC directly (Android Chrome)
@@ -3947,7 +3949,8 @@ setInterval(() => {
   // maps front angles to D6/D7 PWM and rear angles to four taps on the matching side.
   const hapticFirmware = ["v5", "v6", "v7", "v8"].some((v) => boardFw.startsWith(`cam_mic_vest8 ${v}`));
   if (conn && !(conn instanceof DemoConn) && connState === "streaming" && hapticFirmware) {
-    const d = model.last, angle = d && model.now - d.t < 0.35 ? orient(d.angle) : null;
+    const d = model.last;
+    const angle = S.vibrate && d && model.now - d.t < 0.35 ? orient(d.angle) : null;
     sendHapticAngle(angle, t0);
   }
   if (S.find) {
@@ -3964,7 +3967,7 @@ setInterval(() => {
 // a double buzz when you face a danger, a long one when an alarm starts.
 let buzzAt = -99, lastAlarm = -99;
 function findBuzz(found) {
-  if (!found.length || !navigator.vibrate) return;
+  if (!S.vibrate || !found.length || !navigator.vibrate) return;
   const now = model.now, ahead = (d, deg) => Math.abs(orient(d.angle)) < deg;
   if (S.findMode === "alarm") {
     if (now - lastAlarm > 15) navigator.vibrate([400, 150, 400]);
@@ -3990,6 +3993,8 @@ function uiSync() {
   $("aimlock").textContent = aimLock ? `Locked · ${aimText()}` : "Lock aim";
   $("cam").classList.toggle("on", !S.camOff);
   $("cam").textContent = S.camOff ? "Camera off" : "Camera";
+  $("vibrate").classList.toggle("on", !!S.vibrate);
+  $("vibrate").textContent = S.vibrate ? "Vibrate" : "Vibrate off";
   $("stage").classList.toggle("on", !!S.stage);
   $("swaplr").classList.toggle("on", S.swap);
   $("swapfb").classList.toggle("on", S.swapfb);
@@ -4617,6 +4622,17 @@ $("cc").onclick = () => {
 $("find").onclick = () => { setFind(!S.find); save(); uiSync(); };
 $("findmode").onchange = (e) => { S.findMode = e.target.value; setFind(true); save(); uiSync(); };
 $("focus").onclick = () => { S.focus = !S.focus; save(); uiSync(); };
+$("vibrate").onclick = () => {
+  S.vibrate = !S.vibrate;
+  if (!S.vibrate && typeof navigator.vibrate === "function") navigator.vibrate(0);
+  // Stop vest motors right away so they don't keep buzzing until the next watchdog timeout.
+  if (!S.vibrate && conn && !(conn instanceof DemoConn) && connState === "streaming") {
+    sendHapticAngle(null, performance.now());
+  }
+  save();
+  uiSync();
+  hint(S.vibrate ? "Vibration on: vest motors and Find-mode phone buzz" : "Vibration off");
+};
 $("aimlock").onclick = () => toggleAimLock();
 
 function setStage(on) {
